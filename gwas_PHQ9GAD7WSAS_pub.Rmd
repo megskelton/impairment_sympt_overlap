@@ -1,0 +1,576 @@
+---
+title: "gwas_PHQ9GAD7WSAS"
+author: "Megan Skelton"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    theme: flatly
+    toc: true
+    toc_float: 
+      collapsed: true
+    code_folding: hide
+    df_print: paged
+    highlight: monochrome
+    number_sections: no
+---
+
+GWAS performed with regenie https://rgcgithub.github.io/regenie/options/ 
+Scripts adapted from Jessica Mundy  
+King's College London. (2022). King's Computational Research, Engineering and Technology Environment (CREATE). Retrieved March 2, 2022, from https://doi.org/10.18742/rnvf-m076  
+
+Additional QC:  
+*Genotyped data*: MAF 0.01, mind 0.05 (these were the original thresholds and we are using almost the entire sample so do not expect many variants/individuals to be dropped), geno 0.02 (stricter than original; recommended for saliva DNA), HWE 10^-8 (stricter than original)  
+*Imputed data*: MAF 0.01 (original threshold 0.001), INFO 0.3 (original threshold but we are analysing a slightly smaller n), mind 0.05, geno 0.02 (although missingness doesn't have the same meaning in imputed data with dosages; PLINK2 calculates these based on hard calls so anything [0,0.1] = 0, [0.9,1.1] = 1, [1.9,2] = 2, everything else is 'missing')  
+
+# Quality Control
+
+## Restrict bfiles to analysis sample
+
+Keep and remove lists
+```{bash keep remove ids}
+
+cd ~/credentials
+gendatapath=$(sed '1q;d' paths.config.sh) 
+workdir=$(sed '2q;d' paths.config.sh) 
+cd ${workdir}
+
+awk '{print$1,$2}' ${workdir}input/PHQ9GAD7WSAS_pheno_cov_batch_pcs_qcd_sexexcl_ibdexcl_MS.txt > ${workdir}input/keep_ids.txt
+
+```
+
+Restrict sample in PLINK  
+keep file = analysis subset so don't require remove file 
+sex mismatch = discrepancy between phenotypic sex and genetic sex (as indicated by the f-statistic - expected levels of heterozygosity on the x chromosome) or f-statistic between 0.2 and 0.8
+```{bash QC restrict to analysis sample}
+
+module add apps/plink2/2.0.0a2
+
+plink2 \
+-bfile ${gendatapath}v2_genotyping_data/GLADb08b09b12b16b17_b38_EUR_maf1_sample95.SNP95.hwe10.nodup \
+--allow-extra-chr \
+--keep ${workdir}input/keep_ids.txt \
+--remove ${workdir}input/id_sex_mismatch_ibd_outlier.txt
+--make-bed \
+--out ${workdir}input/GLAD_analysis_subset
+
+```
+
+## Minor allele frequency
+```{bash QC MAF 0.01}
+
+plink2 \
+-bfile ${workdir}input/GLAD_analysis_subset \
+--allow-extra-chr \
+--maf 0.01 \
+--make-bed \
+--out ${workdir}input/GLAD_analysis_subset_maf1
+
+```
+
+## Individual missingness
+
+Risk of losing more individuals when running mind before geno (poorly performing variants increase their missingness) but did not occur here
+```{bash QC mind 0.05}
+
+plink2 \
+-bfile ${workdir}input/GLAD_analysis_subset_maf1 \
+--allow-extra-chr \
+--mind 0.05 \
+--make-bed \
+--out ${workdir}input/GLAD_analysis_subset_maf1_sample95
+
+```
+
+## Variant missingness
+```{bash QC geno 0.02}
+
+plink2 \
+-bfile ${workdir}input/GLAD_analysis_subset_maf1_sample95 \
+--allow-extra-chr \
+--geno 0.02 \
+--make-bed \
+--out ${workdir}input/GLAD_analysis_subset_maf1_sample95_snp98
+
+```
+
+## Hardy-weinberg equilibrium
+```{bash QC hwe 10-8}
+
+plink2 \
+-bfile ${workdir}input/GLAD_analysis_subset_maf1_sample95_snp98 \
+--allow-extra-chr \
+--hwe 0.00000001 \
+--make-bed \
+--out ${workdir}input/GLAD_analysis_subset_maf1_sample95_snp98_hwe8
+
+```
+
+## Convert to MT format for regenie
+```{bash Convert to MT format chr for regenie}
+
+plink2 \
+--bfile ${workdir}input/GLAD_analysis_subset_maf1_sample95_snp98_hwe8 \
+--allow-extra-chr \
+--chr 1-22,X,Y,XY \
+--output-chr MT \
+--make-bed \
+--out ${workdir}input/GLAD_analysis_subset_EUR_nodup_maf1_sample95_snp98_hwe8_MTformat
+
+```
+
+## Imputed data QC
+```{bash QC imputed chr files}
+
+cd ~/credentials
+workdir=$(sed '2q;d' paths.config.sh) 
+
+rm ${workdir}scripts/qc_imputed.sh
+cat <<'EOT'>> ${workdir}scripts/qc_imputed.sh
+#!/bin/bash -l
+#SBATCH --partition cpu
+#SBATCH --time=0-48:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --mem-per-cpu=19G
+#SBATCH --job-name=qc_imputed
+#SBATCH --output=../output/qc_imputed_%j.out
+
+gendatapath=$(sed '1q;d' paths.config.sh) 
+workdir=$(sed '2q;d' paths.config.sh) 
+
+module add apps/plink2/2.0.0a2
+
+for i in {1..23};
+do
+plink2 \
+--pfile ${gendatapath}/v2_imputed_data/plink2/GLADv2_rsid_chr${i} \
+--keep ${workdir}input/keep_ids.txt \
+--remove ${workdir}input/id_sex_mismatch_ibd_outlier.txt \
+--maf 0.01 \
+--mind 0.05 \
+--geno 0.02 \
+--hwe 0.00000001 \
+--exclude-if-info "R2<=0.3" \
+--make-pgen \
+--out ${workdir}input/QC_imputed_data/GLAD_analysis_subset_EUR_nodup_maf1_sample95_snp98_hwe8_info3_chr${i}
+done
+EOT
+
+sbatch ${workdir}scripts/qc_imputed.sh
+
+```
+
+
+# Regenie 
+
+## Step 1
+https://rgcgithub.github.io/regenie/options/#genetic-data-file-format  
+```{bash regenie step 1}
+
+conda activate regenie_env
+
+cd ~/credentials
+workdir=$(sed '2q;d' paths.config.sh) 
+
+rm ${workdir}scripts/regenie_PHQ9GAD7WSASWSAS4work_step1.sh
+cat <<'EOT'>> ${workdir}scripts/regenie_PHQ9GAD7WSASWSAS4work_step1.sh
+#!/bin/bash -l
+#SBATCH --partition cpu
+#SBATCH --time=0-48:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --mem-per-cpu=19G
+#SBATCH --job-name=regenie_step1
+#SBATCH --output=../output/extra_qcd_regenie_step1_%j.out
+
+gendatapath=$(sed '1q;d' paths.config.sh) 
+workdir=$(sed '2q;d' paths.config.sh) 
+
+regenie \
+--step 1 \
+--bed ${workdir}input/GLAD_analysis_subset_EUR_nodup_maf1_sample95_snp98_hwe8_MTformat \
+--covarFile ${workdir}input/PHQ9GAD7WSASworkimp_pheno_cov_batch_pcs_qcd_sexexcl_ibdexcl_MS.txt \
+--phenoFile ${workdir}input/PHQ9GAD7WSASworkimp_pheno_cov_batch_pcs_qcd_sexexcl_ibdexcl_MS.txt \
+--phenoColList phq9,gad7,wsas,rwsas4,complwsas_rwsas4,incomplwsas_rwsas4,wsas_work,wsas_imp \
+--covarColList age,age_sq,sex,batch,PC_{1:10} \
+--catCovarList sex,batch \
+--maxCatLevels 4 \
+--bsize 1000 \
+--lowmem \
+--lowmem-prefix ${workdir}results/regenie_step1/tmp_reg1 \
+--out ${workdir}results/regenie_step1/PHQ9GAD7WSASwork__rwsas4_regenie_step1 \
+--threads 8 \
+--gz
+EOT
+
+sbatch ${workdir}scripts/regenie_PHQ9GAD7WSASWSAS4work_step1.sh
+
+```
+
+## Step 2
+```{bash regenie step 2}
+
+conda activate regenie_env
+
+cd ~/credentials
+workdir=$(sed '2q;d' paths.config.sh) 
+
+rm ${workdir}scripts/regenie_PHQ9GAD7WSASWSAS4work_step2.sh
+cat <<'EOT'>> ${workdir}scripts/regenie_PHQ9GAD7WSASWSAS4work_step2.sh
+#!/bin/bash -l
+#SBATCH --partition cpu
+#SBATCH --time=0-48:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --mem-per-cpu=19G
+#SBATCH --job-name=regenie_step2
+#SBATCH --array=1-23
+#SBATCH --output=../output/regenie_step2_%j.out
+
+gendatapath=$(sed '1q;d' paths.config.sh) 
+workdir=$(sed '2q;d' paths.config.sh) 
+
+echo ${SLURM_ARRAY_TASK_ID}
+CHR=${SLURM_ARRAY_TASK_ID}
+echo ${CHR} 
+
+regenie \
+--step 2 \
+--pgen ${workdir}/input/QC_imputed_data/GLAD_analysis_subset_EUR_nodup_maf1_sample95_snp98_hwe8_info3_chr${CHR} \
+--covarFile ${workdir}input/PHQ9GAD7WSASworkimp_pheno_cov_batch_pcs_qcd_sexexcl_ibdexcl_MS.txt \
+--phenoFile ${workdir}input/PHQ9GAD7WSASworkimp_pheno_cov_batch_pcs_qcd_sexexcl_ibdexcl_MS.txt \
+--phenoColList phq9,gad7,wsas,rwsas4,complwsas_rwsas4,incomplwsas_rwsas4,wsas_work,wsas_imp \
+--covarColList age,age_sq,sex,batch,PC_{1:10} \
+--catCovarList sex,batch \
+--maxCatLevels 4 \
+--write-samples \
+--print-pheno \
+--bsize 400 \
+--pred ${workdir}results/regenie_step1/PHQ9GAD7WSASwork_rwsas4_regenie_step1_pred.list \
+--out ${workdir}results/regenie_step2/PHQ9GAD7WSASwork_rwsas4_regenie_step2_chr${CHR} \
+--threads 8 \
+--gz
+
+EOT
+
+sbatch ${workdir}scripts/regenie_PHQ9GAD7WSASWSAS4work_step2.sh
+
+```
+
+## Move ID files to separate dir
+```{bash pheno ID files}
+
+cd ${workdir}results/regenie_step2
+mv PHQ9GAD7WSASwork_rwsas4_regenie_step2_chr1_*.ids regenie_sample_sizes/ #keep one per pheno
+rm *.ids
+
+```
+
+## Merge chromosomes from Step 2 output
+R script adapted from Anna Furtjes  
+Checks correct number chr per trait, merges chr for each trait, ensuring only one header is retained, renames ALLELE0 to ALLELE2 and ID to SNP, transforms pvalues from negative log10 to regular, creates MAF column
+```{bash to save r script to merge output}
+
+cd ~/credentials
+workdir=$(sed '2q;d' paths.config.sh) 
+
+rm ${workdir}scripts/regenie_step2_merge_chr.R
+cat <<'EOT'>> ${workdir}scripts/regenie_step2_merge_chr.R
+
+library(data.table)
+library(tidyverse) #for stringr, tidyr and dplyr
+
+source("paths.config.R")
+setwd(paste0(workdir, "results/regenie_step2/"))
+
+getwd()
+
+pheno_names <- c("phq9",
+                 "gad7", 
+                 "wsas", 
+                 "rwsas4",
+                 "complwsas_rwsas4",
+                 "incomplwsas_rwsas4",
+                 "wsas_work",
+                 "wsas_imp")
+ref <- data.frame(pheno_names)
+
+# test whether all 8 traits have 23 chromosome files assigned to them 
+for(i in 1:nrow(ref)){
+  num<-length(list.files(pattern=paste0(ref$pheno_names[i],".regenie")))
+  print(num)
+  if(num == 23) {print("All files expected are here")} else {break}
+  
+  # save file names for each trait
+  file_names<-list.files(pattern=paste0(ref$pheno_names[i],".regenie"))
+  vector_name<-paste0(ref$pheno_names[i],"_files")
+  print(vector_name)
+  assign(vector_name, 
+         file_names)
+}
+
+# throw error if don't end up with 8 files
+if(length(ls(pattern="_files")) == 9){"You have 8 files"} else {print("You don't have 8 files!")} #glad_gen_files counts here as well so change this to be pheno +1!
+
+print("The traits are:")
+for(i in pheno_names) {print(i)}
+
+for(i in pheno_names) {
+  
+  for(j in 1:23) {
+    file <- fread(file = paste0("PHQ9GAD7WSASwork_regenie_step2_chr", j, "_", i, ".regenie"), 
+                  header = T)
+    assign(paste0("chr", j), file) } # rename each chromosome with its number
+  
+  
+  if(length(ls(pattern = "chr")) == 23)
+    {print("Done reading in chromosomes. You have 23 files")}
+  else 
+    {print("You don't have 23 files!"); break} 
+  
+  # expected rows (sum rows of all individual chromosomes)
+expected_rows <- dim(chr1)[1] + dim(chr2)[1] + dim(chr3)[1] + dim(chr4)[1] + dim(chr5)[1] + dim(chr6)[1] + dim(chr7)[1] + dim(chr8)[1] + dim(chr9)[1] + dim(chr10)[1] + dim(chr11)[1] + dim(chr12)[1] + dim(chr13)[1] + dim(chr14)[1] + dim(chr15)[1] + dim(chr16)[1] + dim(chr17)[1] + dim(chr18)[1] + dim(chr19)[1] + dim(chr20)[1] + dim(chr21)[1] + dim(chr22)[1] + dim(chr23)[1] 
+  
+  # cbind all chromosomes
+  merged_regenie_output <- rbind(chr1,
+                      chr2,
+                      chr3,
+                      chr4,
+                      chr5,
+                      chr6,
+                      chr7,
+                      chr8,
+                      chr9,
+                      chr10,
+                      chr11,
+                      chr12,
+                      chr13,
+                      chr14,
+                      chr15,
+                      chr16,
+                      chr17,
+                      chr18,
+                      chr19,
+                      chr20,
+                      chr21,
+                      chr22,
+                      chr23)
+  
+  print(paste0("Done merging chromosomes for ", i))
+  
+  # rename "ALLELE0" to "ALLELE2" and "ID" to "SNP" in the header
+  merged_regenie_output_renamed <- merged_regenie_output %>% 
+    rename(ALLELE2 = ALLELE0,
+    SNP = ID)
+  
+  # check to see if there are any headers left in the file from the merging of chr
+  headers_remaining <- merged_regenie_output_renamed %>% 
+    filter(ALLELE2 == "ALLELE0") %>% 
+    nrow()
+  
+  if(headers_remaining != 0) {
+    print("Warning: there are chromosome headers in the merged and filtered file")
+  # Filter out any rows which have "ALLELE0" in the "ALLELE2" column (i.e. headers from all the other chromosomes)
+  merged_regenie_output_renamed <- merged_regenie_output_renamed %>% 
+    filter(ALLELE2 != "ALLELE0")
+  print("Chromosome headers in merged and filtered file have been removed") }
+  
+  print("No chromosome headers in merged and filtered file")
+  
+  # check number of rows in merged and filtered file
+  num_rows <- dim(merged_regenie_output_renamed)[1]
+  print(paste0("There are ", num_rows, " rows in the merged file"))
+  if(expected_rows != num_rows) {
+    print("Warning: the number of rows in the merged and filtered file does not match the expected number of rows!");
+    break } 
+      else {print("The number of rows in the merged and filtered file match the expected number of rows") }
+  
+  # transform pvalues from log transformation to regular: https://www.biostars.org/p/358046/
+  merged_regenie_output_renamed$P<-10^(-merged_regenie_output_renamed$LOG10P)
+  if(min(merged_regenie_output_renamed$P, na.rm=T)<=0 | max(merged_regenie_output_renamed$P, na.rm=T) >= 1)
+  {print("Transformed p-value is out of bounds"); break}
+  
+  print("Done transforming p-value column, and p-values are between 0 and 1")
+  
+  # create MAF column
+  merged_regenie_output_renamed$MAF<-if_else(condition = merged_regenie_output_renamed$A1FREQ < 0.5, 
+                                     true = merged_regenie_output_renamed$A1FREQ, 
+                                     false = 1-merged_regenie_output_renamed$A1FREQ)
+  print("Done creating MAF column")
+  
+  
+  print(paste0("This is the file head for ",i))
+  print(head(merged_regenie_output_renamed))
+  
+  # save merged sumstats file
+  write.table(merged_regenie_output_renamed, 
+              paste0("regenie_step2_allchr_", i,
+                     ".txt"), 
+              sep = "\t", 
+              row.names = FALSE, 
+              col.names = TRUE,
+              quote = FALSE)
+}
+
+print("Done merging all chromosomes for all phenotypes!")
+
+EOT
+
+```
+
+```{bash unzip gz regenie files}
+
+cd ${workdir}results/regenie_step2
+gunzip *.regenie.gz # unzip all chromosomes
+
+```
+
+```{bash run merging chr R script}
+
+cd ~/credentials
+workdir=$(sed '2q;d' paths.config.sh) 
+
+rm ${workdir}scripts/regenie_step2_merge_chr.sh
+cat <<'EOT'>> ${workdir}scripts/regenie_step2_merge_chr.sh
+#!/bin/bash -l
+#SBATCH --partition cpu
+#SBATCH --time=0-48:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --mem-per-cpu=19G
+#SBATCH --job-name=merge_regenie
+#SBATCH --output=../output/regenie_merge_chr_%j.out
+
+workdir=$(sed '2q;d' paths.config.sh) 
+cd ${workdir}scripts/
+
+module add r/4.1.1-gcc-9.4.0-python-3.8.12
+module add libxml2/2.9.12-gcc-9.4.0
+Rscript regenie_step2_merge_chr.R
+
+EOT
+
+sbatch ${workdir}scripts/regenie_step2_merge_chr.sh
+
+```
+
+## MAF & INFO Filter
+Data was filtered to MAF 0.01 and INFO 0.3 but check regardless; can exclude in secondary analyses
+```{bash check and filter MAF INFO}
+
+# remove per chromosome results as have now merged
+rm PHQ9GAD7WSASwork_regenie_step2_chr*.regenie
+
+awk '{print NF}' regenie_step2_allchr_phq9.txt | head
+wc -l regenie_step2_allchr_phq9.txt
+awk '$16 < 0.01 {print}' regenie_step2_allchr_phq9.txt | wc -l
+awk '$7 < 0.3 {print}' regenie_step2_allchr_phq9.txt | wc -l
+
+FILES="regenie_step2_allchr_*.txt"
+for f in $FILES; do awk '$16 >= 0.01 {print}' ${f} > ${f}.maf01; done
+FILES="regenie_step2_allchr_*.txt.maf01"
+for f in $FILES; do awk '$7 >= 0.3 {print}' ${f} > ${f}.info3; done
+
+```
+
+Compress files
+```{bash compress files}
+
+#remove unfiltered allchr and maf01 files, rename maf01 + info3 filtered file as allchr
+FILES="regenie_step2_allchr_*.txt"
+for f in $FILES; do gzip ${f}; done
+
+```
+
+
+# Manhattan & QQ plots
+```{bash manhattan and qq plots}
+
+cd ~/credentials
+workdir=$(sed '2q;d' paths.config.sh) 
+
+rm ${workdir}scripts/manqqplots.sh
+cat <<'EOT'>> ${workdir}scripts/manqqplots.sh
+#!/bin/bash -l
+#SBATCH --partition cpu
+#SBATCH --time=0-12:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --mem-per-cpu=12G
+#SBATCH --job-name=man_qq_plots
+#SBATCH --output=../output/manhattan_qq_plot_%j.out
+
+cd ~/credentials
+workdir=$(sed '2q;d' paths.config.sh) 
+
+FILES=("phq9" "gad7" "wsas" "rwsas4" "complwsas_rwsas4" "wsas_work" "wsas_imp")
+for f in ${FILES[@]};
+do
+echo '
+source("paths.config.R")
+
+glad_palette = c("#efc00b", "#b7dee8")
+
+'$f'.results <- read.table(paste0(workdir,"results/regenie_step2/regenie_step2_allchr_'$f'.txt"), header=T)
+
+library(qqman)
+
+bitmap(paste0(workdir,"figures/'$f'_regenie_extraqc_gwas_manhattan.png"), type = "png16m",  height = 7, width = 7, res = 300)
+
+par(cex.axis = 1.1, cex.lab = 1.3)
+manhattan('$f'.results, 
+chr="CHROM", 
+bp="GENPOS",
+p="P",
+snp="SNP",
+logp = TRUE,
+ylim = c(0, 8),
+col = glad_palette,
+cex = 0.5,
+suggestiveline = -log10(1e-05), 
+genomewideline = -log10(5e-08))
+
+
+bitmap(paste0(workdir,"figures/'$f'_regenie_extraqc_gwas_qqplot.png"), type = "png16m", height = 7, width = 7, res = 300)
+
+par(mar=c(5,5,1,1))
+qq('$f'.results$P,
+cex.axis = 1.1,
+cey.axis = 1.1,
+cex.lab = 1.3,
+cey.lab = 1.3,
+xlim = c(0, 8),
+ylim = c(0, 8))
+
+dev.off()'
+done > ${workdir}scripts/manqqplots.R
+
+module add apps/R/3.6.0
+R --file=${workdir}scripts/manqqplots.R
+
+EOT
+
+sbatch ${workdir}scripts/manqqplots.sh
+
+```
+
+
+# Calculate λ
+http://genometoolbox.blogspot.com/2014/08/how-to-calculate-genomic-inflation.html 
+```{r Calculate genomic correction factor}
+
+source("paths.config.R")
+
+phq.results = read.table(gzfile(paste0(workdir,"results/regenie_step2/regenie_step2_allchr_maf01_rsid_phq9.txt.gz"), header=T))
+median(phq.results$CHISQ)/qchisq(0.5,1)
+
+gad.results = read.table(gzfile(paste0(workdir,"results/regenie_step2/regenie_step2_allchr_maf01_rsid_gad7.txt.gz"), header=T))
+median(gad.results$CHISQ)/qchisq(0.5,1)
+
+wsas.results = read.table(gzfile(paste0(workdir,"results/regenie_step2/regenie_step2_allchr_maf01_rsid_wsas.txt.gz"), header=T))
+median(wsas.results$CHISQ)/qchisq(0.5,1)
+
+rwsas4.results = read.table(gzfile(paste0(workdir,"results/regenie_step2_allchr_maf01_rsid_rwsas4.txt.gz"), header=T))
+median(rwsas4.results$CHISQ)/qchisq(0.5,1)
+
+```

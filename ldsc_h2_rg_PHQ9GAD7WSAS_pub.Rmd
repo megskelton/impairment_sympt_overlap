@@ -1,0 +1,1555 @@
+---
+title: "PHQ9GAD7WSAS h2 and rg estimations using LDSC"
+author: "Megan Skelton"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    theme: flatly
+    toc: true
+    toc_float: 
+      collapsed: true
+    code_folding: hide
+    df_print: paged
+    highlight: monochrome
+    number_sections: no
+---
+
+Heritability and genetic correlation estimates using LDSC https://github.com/bulik/ldsc/wiki/Heritability-and-Genetic-Correlation  
+Includes code for genetic correlations with external phenotypes
+
+# Set up
+
+```{r setup, include = F}
+
+knitr::opts_chunk$set(results = 'asis',     
+                      comment = NA,
+                      prompt = FALSE,
+                      cache = FALSE,
+                      warning = FALSE,
+                      message = FALSE,
+                      fig.height = 5, 
+                      fig.width = 10,
+                      fig.align = "center")
+
+```
+
+```{r Clear global environment, include = F}
+
+rm(list = ls())
+
+```
+
+```{r Install packages}
+
+#load functions
+source(file = "../functions/package_check.R")
+source(file = "../functions/sumscores.R")
+
+formatv <- function(x, ...) {
+  mapply(format, x, scientific = abs(x) < 0.001, ...)
+}    
+
+packages = c(
+  "kableExtra", #format output
+  "tidyverse" #multiple packages for tidy coding, cleaning, wrangling, visualising data
+  )
+
+package_check(packages)
+
+```
+
+```{r GLAD colour palette for plots}
+
+glad_palette = c("#efc00b", "#b7dee8")
+my.palette = c("#E7298A", "#009974", "#D95F02", "#7570B3") #colorbrewer Dark2 reordered
+
+```
+
+```{r ggplot theme}
+
+my_theme = theme(
+  axis.title.x = element_text(colour = "black", size = 13),
+  axis.title.y = element_text(colour = "black", size = 13, vjust = .5),
+  axis.text = element_text(colour = "black", size = 11),
+  axis.ticks = element_blank(),
+  panel.background = element_blank(),
+  legend.text = element_text(colour="black", size=11),
+  legend.key = element_blank())
+
+```
+
+# Munge sum stats using HapMap3 & 1000 Genomes LD reference panel
+
+Munge summary statistics prior to use in LDSC using reference panel: a list of variants based on HapMap3 & the 1KG Phase 3 European subset ancestry panel
+Requires sumstats files to be unzipped
+```{bash ldsc munge sumstats, eval = F} 
+
+conda activate ldsc_env
+cd ~/credentials
+workdir=$(sed '2q;d' paths.config.sh) 
+
+rm ${workdir}scripts/LDSC_munge_regenie_PHQ9GAD7WSAS_sumstats.sh
+cat <<'EOT'>> ${workdir}scripts/LDSC_munge_regenie_PHQ9GAD7WSAS_sumstats.sh
+#!/bin/bash -l
+#SBATCH --partition cpu
+#SBATCH --time=0-48:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --mem-per-cpu=19G
+#SBATCH --job-name=munge_ldsc
+#SBATCH --output=../output/regenie_ldsc_munge_%j.out
+
+workdir=$(sed '2q;d' paths.config.sh)
+hm3_1kg_ref=$(sed '3q;d' paths.config.sh)
+
+FILES=("phq9" "gad7" "wsas" "rwsas4" "complwsas_rwsas4" "incomplwsas_rwsas4" "wsas_work" "wsas_imp)
+for f in ${FILES[@]};
+do
+
+python /users/k1756554/ldsc/munge_sumstats.py \
+--sumstats ${workdir}results/regenie_step2/regenie_step2_allchr_${f}.txt \
+--merge-alleles ${hm3_1kg_ref}combined.hm3_1kg.snplist.vanilla.jz2020.txt \
+--chunksize 50000 \
+--out ${workdir}results/ldsc/${f}_munged_extraqc_hm3_1kg
+
+done
+
+EOT
+
+sbatch ${workdir}scripts/LDSC_munge_regenie_PHQ9GAD7WSAS_sumstats.sh
+
+```
+
+# Remove high LD Regions including MHC
+
+## Identify high LD regions 
+
+https://github.com/JoniColeman/gwas_scripts/blob/master/highLDregions4bim_b38.awk list of bp regions for GRCh38 build, use with GLAD bim file to identify rsIDs to remove  
+For imputed sumstats this won't suffice (as bim file won't contain all the rsIDs of potential high LD region variants in the imputed data) - use with SNP list file that was used for munging (combined.hm3_1kg.snplist.vanilla.jz2020.txt) to identify rsIDs to remove
+```{bash Remove MHC, eval = F}
+
+cd ~/credentials
+hm3_1kg_ref=$(sed '3q;d' paths.config.sh)
+workdir=$(sed '2q;d' paths.config.sh) 
+
+# Regions to exclude (from left to right: first argument = chr, second =  bp, third = SNP rsID, $col depends on file)
+echo '($2 == 1) && ($3 >= 47822309) && ($3 <= 51822307) {print $1}
+($2 == 2) && ($3 >= 85861220) && ($3 <= 100425020) {print $1}
+($2 == 2) && ($3 >= 133908698) && ($3 <= 137408698) {print $1}
+($2 == 2) && ($3 >= 182309768) && ($3 <= 189309768) {print $1}
+($2 == 3) && ($3 >= 47483507) && ($3 <= 49987563) {print $1}
+($2 == 3) && ($3 >= 83368160) && ($3 <= 86868160) {print $1}
+($2 == 3) && ($3 >= 88868161) && ($3 <= 96298466) {print $1}
+($2 == 5) && ($3 >= 44464142) && ($3 <= 51168409) {print $1}
+($2 == 5) && ($3 >= 98636397) && ($3 <= 101136397) {print $1}
+($2 == 5) && ($3 >= 129636409) && ($3 <= 132636409) {print $1}
+($2 == 5) && ($3 >= 136136413) && ($3 <= 139136412) {print $1}
+($2 == 6) && ($3 >= 25391794) && ($3 <= 33424245) {print $1}
+($2 == 6) && ($3 >= 57027244) && ($3 <= 63232136) {print $1}
+($2 == 6) && ($3 >= 139637171) && ($3 <= 142137170) {print $1}
+($2 == 7) && ($3 >= 55158099) && ($3 <= 67090863) {print $1}
+($2 == 8) && ($3 >= 8105069) && ($3 <= 12105082) {print $1}
+($2 == 8) && ($3 >= 43025701) && ($3 <= 48924888) {print $1}
+($2 == 8) && ($3 >= 110918596) && ($3 <= 113918595) {print $1}
+($2 == 10) && ($3 >= 36671067) && ($3 <= 43184546) {print $1}
+($2 == 11) && ($3 >= 46021874) && ($3 <= 57475951) {print $1}
+($2 == 11) && ($3 >= 88127185) && ($3 <= 91127184) {print $1}
+($2 == 12) && ($3 >= 32955800) && ($3 <= 41319931) {print $1}
+($2 == 12) && ($3 >= 110599476) && ($3 <= 113099475) {print $1}
+($2 == 20) && ($3 >= 33948534) && ($3 <= 36438183) {print $1}' > ${workdir}results/ldsc/highld_excl/highLDregions_rsID_imp_b38_formungeSNPlist.awk
+
+awk -f ${workdir}results/ldsc/highld_excl/highLDregions_rsID_imp_b38_formungeSNPlist.awk ${hm3_1kg_ref}combined.hm3_1kg.snplist.vanilla.jz2020.txt > ldsc_hm31kg_highld_b38_imp_excludes
+
+```
+
+## Remove high LD regions from munged summary statistics
+
+Adapted from Helena Gaspar's script which used HM3 SNP IDs to remove the MHC (not other high LD regions) in munged UKB data  
+Uses rsID values  
+```{bash Remove regions using SNP list, eval = F}
+
+cd ~/credentials
+workdir=$(sed '2q;d' paths.config.sh)
+
+cd ${workdir}results/ldsc/highld_excl
+
+printf "phq9
+gad7
+wsas
+rwsas4 
+incomplwsas_rwsas4 
+complwsas_rwsas4 
+wsas_work
+wsas_imp \n" > traits_for_mhc_removal.txt #\n so wc -l counts the last line
+
+varid=traits_for_mhc_removal.txt
+echo $varid
+
+pathvarid="${workdir}results/ldsc/highld_excl/${varid}"
+echo $pathvarid
+
+countvarid=$(wc -l ${pathvarid}|awk '{printf $1}')
+echo $countvarid
+
+for i in `seq 1 ${countvarid}`
+
+do name=$(gawk -v myvar=$i 'NR==myvar{printf $1}' ${pathvarid})
+if [ -f ${workdir}results/ldsc/${name}_munged_extraqc_hm3_1kg.sumstats.gz ]; then zcat ${workdir}results/ldsc/${name}_munged_extraqc_hm3_1kg.sumstats.gz > tmp; gawk -F"\t" '{if(f==1){r[$1]}else if(!($1 in r)){print}}' f=1 ldsc_hm31kg_highld_b38_imp_excludes f=2 tmp > ${workdir}results/ldsc/${name}_munged_extraqc_hm3_1kg_noMHChighLD.sumstats; gzip ${workdir}results/ldsc/${name}_munged_extraqc_hm3_1kg_noMHChighLD.sumstats; fi;
+
+done
+
+```
+
+```{bash check high ld region removal}
+
+# number of snps in exclusions file
+wc -l ${workdir}results/ldsc/highld_excl/ldsc_hm31kg_highld_b38_imp_excludes
+
+# n snps removed from the created file vs. original sumstats file. comm compares 2 files rowwise: 3 cols output unique to file 1, unique to file 2 and shared lines. flag -13 after comm suppresses cols 1 and 3 so we just get 'col 2' of the 5 columns that are in file 2 and not in file 1
+comm -13 <(gzip -cd phq9_munged_extraqc_hm3_1kg_noMHChighLD.sumstats.gz | sort) <(gzip -cd phq9_munged_extraqc_hm3_1kg.sumstats.gz | sort) > removed_snps.txt
+
+wc -l removed_snps.txt
+#keep only SNPs column from removed snps file
+awk '{print $1}' removed_snps.txt > removed_b38_imp_snps_only.txt
+rm removed_snps.txt
+
+#check that all snps removed were mhc/highld region snps (checking they have N snps in common)
+comm -12 <(sort ${workdir}results/ldsc/highld_excl/highld_b38_imp_regenie_step2_allchr_phq9.txt_excludes) <(sort removed_b38_imp_snps_only.txt) > imp_b38_snps_check.txt
+wc -l imp_b38_snps_check.txt
+
+rm highld_excl/tmp
+
+```
+
+# Estimate LDSC SNP-heritability 
+
+Using LD-scores based on the LDSC HM3 (from 1KG Phase 3) European ancestry subset reference panel and the munged summary statistics  
+https://github.com/bulik/ldsc/issues/27 : using the *eur_w_ld_chr/* LD Scores as the argument to both --ref-ld-chr and --w-ld-chr is intentional. For some reason, these LD Scores (which are sum r^2 with the sum taken over *HapMap3 SNPs*) tend to give more reasonable results...probably because the 1000 Genomes LD Scores (eur_ref_ld_chr; sum r^2 taken over all 1000 Genomes SNPs) give too much weight to low MAF SNPs, and HapMap 3 LD Scores given a little more weight to common variants. eur_w_ld_chr.1KG_Phase3.jz2020 gives estimates with larger SEs
+```{bash ldsc estimate heritability, eval = F}
+
+cd ~/credentials
+workdir=$(sed '2q;d' paths.config.sh) 
+
+rm ${workdir}scripts/LDSC_h2_PHQ9GAD7WSAS_sumstats.sh
+cat <<'EOT'>> ${workdir}scripts/LDSC_h2_PHQ9GAD7WSAS_sumstats.sh
+#!/bin/bash -l
+#SBATCH --partition brc,shared
+#SBATCH --time=0-48:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --mem-per-cpu=19G
+#SBATCH --job-name=ldsc_h2
+#SBATCH --output=/tmp_scratch/users/k1756554/glad_phq9gad7wsas/output/ldsc_h2_LDSCref%j.out
+
+workdir=$(sed '2q;d' paths.config.sh)
+hm3_1kg_ref=$(sed '3q;d' paths.config.sh)
+hm3_ref=$(sed '6q;d' paths.config.sh)
+
+module add devtools/anaconda/2019.3-python2.7.16 
+
+FILES=("phq9" "gad7" "wsas" "rwsas4" "complwsas_rwsas4" "incomplwsas_rwsas4" "wsas_work" "wsas_imp")
+for f in ${FILES[@]};
+do
+
+python /users/k1756554/ldsc/ldsc.py \
+--h2 ${workdir}results/ldsc/${f}_munged_extraqc_hm3_1kg_noMHChighLD.sumstats.gz \
+--ref-ld-chr ${hm3_ref}eur_w_ld_chr/ \
+--w-ld-chr ${hm3_ref}eur_w_ld_chr/ \
+--out ${workdir}results/ldsc/${f}_ldsc_h2_extraqc_noMHChighLD_LDSCref
+
+done
+EOT
+
+sbatch ${workdir}scripts/LDSC_h2_PHQ9GAD7WSAS_sumstats.sh
+
+```
+
+## LDSC SNP heritability output
+
+- Lambda > 1.05 suggests inflation due to pop strat or other confounders
+- Genetic correlation estimates for traits with a h2 z-score (h2 estimate/h2 SE) < 4 are generally too noisy to report [see Bulik-Sullivan et al., (2014), Neale Lab].  
+Zheng et al., 2017 for LDHub:  
+- Suggest h2 z-scores are > 1.5, optimally > 4. Not a massive limitation if < 4 but worth mentioning as a caveat  
+- Mean Chi-square of test statistic should be > 1.02  
+- Intercept 0.9-1.1   
+- Ratio (intercept-1)/(mean(chi^2)-1) is the amount of inflation from stratification:amount from strat + true genetic effects, therefore expect ~1 if inflation only reflects pop strat, and 0 if only reflects genetic effects; values between 0 and 1 indicate the relative balance of these factors. It is undefined if there's no inflation in the GWAS from stratification or genetics. e.g. 0.08 = 8% of the inflation in chi^2 can be attributed to factors other than genetic effects  
+
+Can calculate p using pchisq((h2/se)^2,1,lower.tail = FALSE) (approved by LDSC team e.g. https://groups.google.com/g/ldsc_users/c/adiEP9SB0U8/m/n0K-duUaAQAJ)
+
+### Table
+```{r Table ldsc h2}
+
+trait = c("PHQ9", "GAD7", "WSAS")
+obs.h2 = c(0.1043, 0.0824, 0.1166)
+obs.h2.se = c(0.0285, 0.0297, 0.031)
+lower.ci = c(obs.h2-(1.96*obs.h2.se))
+upper.ci = c(obs.h2+(1.96*obs.h2.se))
+p.val = pchisq((obs.h2/obs.h2.se)^2,1,lower.tail = FALSE)
+z.score = obs.h2/obs.h2.se
+lambda.gc = c(1.0466, 1.0285, 1.0315)
+mean.chi2 = c(1.0456, 1.0345, 1.0334)
+ldsc.int = c(1.0102, 1.0071, 0.993)
+ldsc.int.se = c(0.0069, 0.0072, 0.0073)
+ratio = c(0.2243, 0.2044, 0) #0 is actually < 0 which usually indicates GC correction. NA if mean chi^2 < 1
+ratio.se = c(0.1509, 0.2078, 0)
+ldsc.h2 <- data.frame(trait, obs.h2, obs.h2.se, lower.ci, upper.ci, p.val, z.score, lambda.gc, mean.chi2, ldsc.int, ldsc.int.se)
+ldsc.h2.table <- ldsc.h2%>%
+  mutate(across(where(is.numeric), formatv, digit = 1, nsmall = 3))
+ldsc.h2.table%>%kable(caption = "LDSC h2 Output",
+        col.names = c("Trait", "Observed h2", "h2 SE", "LCI", "UCI", 
+                      paste0("p", footnote_marker_symbol(1)),
+                      "z-score", "λ", "Mean χ2", "Intercept", "Intercept SE"),
+        escape = F,
+        digits = c(0, rep(3, 10)),
+        align = "lcccccccccc")%>%
+  footnote(symbol = "Calculated as pchisq((h2/se)^2,1,F)")%>%
+  kable_styling()
+
+```
+
+### Figure
+```{r Fig ldsc h2 estimates}
+
+ldsc.h2 <- ldsc.h2%>%
+  mutate(trait = fct_relevel(trait, c("PHQ9", "GAD7", "WSAS")))
+
+ggplot(data=ldsc.h2, 
+       aes(x=trait,
+           y=obs.h2,
+           colour=trait)) +
+  geom_point(position=position_dodge(width=.5), 
+             size=3) +
+  geom_errorbar(aes(ymin=obs.h2-(1.96*obs.h2.se), ymax=obs.h2 + (1.96*obs.h2.se)),
+                position=position_dodge(0.5),
+                width=.2, size=0.6) +
+  scale_fill_manual(values = my.palette) +
+  scale_color_manual(values = my.palette) +
+  scale_y_continuous(breaks = seq(0, 0.30, 0.05), limits = c(-0.01, 0.305)) +
+  labs(x = "Trait",
+       y = "LDSC h2") +
+  my_theme +
+  theme(legend.position = "none",
+        panel.grid.major.y = element_line(linetype = "dotted",
+                                          colour = "gray"))
+
+```
+
+### Table & figure with complete case WSAS (WSAS-5-c) and WSAS 4-item 
+```{r Table WSAS-5-c WSAS-4 ldsc h2}
+
+trait = c("PHQ9", "GAD7", "WSAS", "WSAS_4")
+obs.h2 = c(0.1043, 0.0824, 0.1251, 0.1113)
+obs.h2.se = c(0.0285, 0.0297, 0.0323, 0.0298)
+lower.ci = c(obs.h2-(1.96*obs.h2.se))
+upper.ci = c(obs.h2+(1.96*obs.h2.se))
+p.val = pchisq((obs.h2/obs.h2.se)^2,1,lower.tail = FALSE)
+z.score = obs.h2/obs.h2.se
+lambda.gc = c(1.0466, 1.0285, 1.0046, 1.0345)
+mean.chi2 = c(1.0456, 1.0345, 1.0012, 1.0335)
+ldsc.int = c(1.0102, 1.0071, 0.9633, 0.9954)
+ldsc.int.se = c(0.0069, 0.0072, 0.0069, 0.007)
+ratio = c(0.2243, 0.2044, 0, 0) #0 are actually < 0 which usually indicates GC correction. NA if mean chi^2 < 1
+ratio.se = c(0.1509, 0.2078, 0, 0)
+ldsc.h2 <- data.frame(trait, obs.h2, obs.h2.se, lower.ci, upper.ci, p.val, z.score, lambda.gc, mean.chi2, ldsc.int, ldsc.int.se)
+ldsc.h2.table <- ldsc.h2%>%
+  mutate(across(where(is.numeric), formatv, digit = 1, nsmall = 3))
+ldsc.h2.table%>%kable(caption = "LDSC h2 Output",
+        col.names = c("Trait", "Observed h2", "h2 SE", "LCI", "UCI",
+                      paste0("p", footnote_marker_symbol(1)),
+                      "z-score", "λ", "Mean χ2", "Intercept", "Intercept SE"),
+        escape = F,
+        digits = c(0, rep(3, 10)),
+        align = "lcccccccccc")%>%
+  footnote(symbol = "Calculated as pchisq((h2/se)^2,1,F)")%>%
+  kable_styling()
+
+```
+
+```{r Fig ldsc h2 WSAS-5-c WSAS-4 estimates}
+
+ldsc.h2 <- ldsc.h2%>%
+  mutate(trait = fct_relevel(trait, c("PHQ9", "GAD7", "WSAS", "WSAS_4")))
+
+ggplot(data=ldsc.h2, 
+       aes(x=trait,
+           y=obs.h2,
+           colour=trait)) +
+  geom_point(position=position_dodge(width=.5), 
+             size=3) +
+  geom_errorbar(aes(ymin=obs.h2-(1.96*obs.h2.se), ymax=obs.h2 + (1.96*obs.h2.se)),
+                position=position_dodge(0.5),
+                width=.2, 
+                size=0.6) +
+  scale_fill_manual(values = my.palette) +
+  scale_color_manual(values = my.palette) +
+  scale_y_continuous(breaks = seq(0, 0.30, 0.05), limits = c(-0.01, 0.305)) +
+  labs(x = "Trait",
+       y = "LDSC h2") +
+  my_theme +
+  theme(legend.position = "none",
+        panel.grid.major.y = element_line(linetype = "dotted",
+                                          colour = "gray"))
+
+```
+
+# Estimate LDSC internal genetic correlations
+
+https://github.com/bulik/ldsc/wiki/Heritability-and-Genetic-Correlation#--rg 
+
+## PHQ9
+```{bash ldsc internal phq9 rg, eval = F}
+
+cd ~/credentials
+workdir=$(sed '2q;d' paths.config.sh) 
+
+rm ${workdir}scripts/LDSC_rg_PHQ9GAD7WSASwork_sumstats.sh
+cat <<'EOT'>> ${workdir}scripts/LDSC_rg_PHQ9GAD7WSASwork_sumstats.sh
+#!/bin/bash -l
+#SBATCH --partition brc,shared
+#SBATCH --time=0-48:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --mem-per-cpu=19G
+#SBATCH --job-name=ldsc_rg
+#SBATCH --output=/tmp_scratch/users/k1756554/glad_phq9gad7wsas/output/ldsc_rg_phq9-gad7wsasrwsas4work_LDSCref_%j.out
+
+workdir=$(sed '2q;d' paths.config.sh)
+hm3_ref=$(sed '6q;d' paths.config.sh)
+
+module add devtools/anaconda/2019.3-python2.7.16 
+
+python /users/k1756554/ldsc/ldsc.py \
+--rg ${workdir}results/ldsc/phq9_munged_extraqc_hm3_1kg_noMHChighLD.sumstats.gz,${workdir}results/ldsc/gad7_munged_extraqc_hm3_1kg_noMHChighLD.sumstats.gz,${workdir}results/ldsc/wsas_munged_extraqc_hm3_1kg_noMHChighLD.sumstats.gz,${workdir}results/ldsc/rwsas4_munged_extraqc_hm3_1kg_noMHChighLD.sumstats.gz,${workdir}results/ldsc/wsas_work_munged_extraqc_hm3_1kg_noMHChighLD.sumstats.gz \
+--ref-ld-chr ${hm3_ref}eur_w_ld_chr/ \
+--w-ld-chr ${hm3_ref}eur_w_ld_chr/ \
+--out ${workdir}results/ldsc/int_rg/phq9_ldsc_rg_extraqc_noMHChighLD_LDSCref
+
+EOT
+
+sbatch ${workdir}scripts/LDSC_rg_PHQ9GAD7WSASwork_sumstats.sh
+
+```
+
+## GAD7
+```{bash ldsc internal gad7 rg, eval = F}
+
+cd ~/credentials
+workdir=$(sed '2q;d' paths.config.sh) 
+
+rm ${workdir}scripts/LDSC_rg_GAD7WSAS_sumstats.sh
+cat <<'EOT'>> ${workdir}scripts/LDSC_rg_GAD7WSAS_sumstats.sh
+#!/bin/bash -l
+#SBATCH --partition brc,shared
+#SBATCH --time=0-48:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --mem-per-cpu=19G
+#SBATCH --job-name=ldsc_rg
+#SBATCH --output=/tmp_scratch/users/k1756554/glad_phq9gad7wsas/output/ldsc_rg_gad7-wsasrwsas4work_LDSCref%j.out
+
+workdir=$(sed '2q;d' paths.config.sh)
+hm3_ref=$(sed '6q;d' paths.config.sh)
+
+module add devtools/anaconda/2019.3-python2.7.16 
+
+python /users/k1756554/ldsc/ldsc.py \
+--rg ${workdir}results/ldsc/gad7_munged_extraqc_hm3_1kg_noMHChighLD.sumstats.gz,${workdir}results/ldsc/wsas_munged_extraqc_hm3_1kg_noMHChighLD.sumstats.gz,${workdir}results/ldsc/rwsas4_munged_extraqc_hm3_1kg_noMHChighLD.sumstats.gz,${workdir}results/ldsc/wsas_work_munged_extraqc_hm3_1kg_noMHChighLD.sumstats.gz \
+--ref-ld-chr ${hm3_ref}eur_w_ld_chr/ \
+--w-ld-chr ${hm3_ref}eur_w_ld_chr/ \
+--out ${workdir}results/ldsc/int_rg/gad7_ldsc_rg_extraqc_noMHChighLD_LDSCref
+
+EOT
+
+sbatch ${workdir}scripts/LDSC_rg_GAD7WSAS_sumstats.sh
+
+```
+
+## Imputed WSAS
+Main WSAS pheno used in manuscript: 5-item score with one of the five items individual mean imputed where missing
+```{bash ldsc internal wsas_imp rg, eval = F}
+
+cd ~/credentials
+workdir=$(sed '2q;d' paths.config.sh) 
+
+rm ${workdir}scripts/LDSC_rg_WSAS_sumstats.sh
+cat <<'EOT'>> ${workdir}scripts/LDSC_rg_WSAS_sumstats.sh
+#!/bin/bash -l
+#SBATCH --partition brc,shared
+#SBATCH --time=0-48:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --mem-per-cpu=19G
+#SBATCH --job-name=ldsc_rg
+#SBATCH --output=/tmp_scratch/users/k1756554/glad_phq9gad7wsas/output/ldsc_rg_wsasrwsas4_LDSCref%j.out
+
+workdir=$(sed '2q;d' paths.config.sh)
+hm3_ref=$(sed '6q;d' paths.config.sh)
+
+module add devtools/anaconda/2019.3-python2.7.16 
+
+python /users/k1756554/ldsc/ldsc.py \
+--rg ${workdir}results/ldsc/wsas_imp_munged_extraqc_hm3_1kg_noMHChighLD.sumstats.gz,${workdir}results/ldsc/phq9_munged_extraqc_hm3_1kg_noMHChighLD.sumstats.gz,${workdir}results/ldsc/gad7_munged_extraqc_hm3_1kg_noMHChighLD.sumstats.gz \
+--ref-ld-chr ${hm3_ref}eur_w_ld_chr/ \
+--w-ld-chr ${hm3_ref}eur_w_ld_chr/ \
+--out ${workdir}results/ldsc/int_rg/wsas_imp_ldsc_rg_extraqc_noMHChighLD_LDSCref
+
+EOT
+
+sbatch ${workdir}scripts/LDSC_rg_WSAS_sumstats.sh
+
+```
+
+## Table
+```{r Input tables ldsc rg}
+
+#rg
+PHQ9.rg = c(1, 0.8508, 0.8211)
+GAD7.rg = c(0.8508, 1, 0.7686)
+WSAS.rg = c(0.8211, 0.7686, 1)
+ldsc.rg = rbind(PHQ9.rg, GAD7.rg, WSAS.rg)
+colnames(ldsc.rg) = c("PHQ9", "GAD7", "WSAS")
+rownames(ldsc.rg) = c("PHQ9", "GAD7", "WSAS")
+ldsc.rg%>%kable(caption = "rgs",
+                   digits = c(rep(2, 3)))%>%
+  kable_styling()
+
+
+#SE
+PHQ9.rg.se = c(0, 0.1131, 0.1066)
+GAD7.rg.se = c(0.1131, 0, 0.1595)
+WSAS.rg.se = c(0.1066, 0.1595, 0)
+ldsc.rg.se = rbind(PHQ9.rg.se, GAD7.rg.se, WSAS.rg.se)
+colnames(ldsc.rg.se) = c("PHQ9", "GAD7", "WSAS")
+ldsc.rg.se%>%kable(caption = "rg SEs",
+                   digits = c(rep(3, 3)))%>%
+  kable_styling()
+
+
+#95% CI
+PHQ9.rg.lci = round(PHQ9.rg - (1.96*PHQ9.rg.se),3)
+PHQ9.rg.uci = round(PHQ9.rg + (1.96*PHQ9.rg.se),3)
+GAD7.rg.lci = round(GAD7.rg - (1.96*GAD7.rg.se),3)
+GAD7.rg.uci = round(GAD7.rg + (1.96*GAD7.rg.se),3)
+WSAS.rg.lci = round(WSAS.rg - (1.96*WSAS.rg.se),3)
+WSAS.rg.uci = round(WSAS.rg + (1.96*WSAS.rg.se),3)
+PHQ9.rg.ci = paste0(PHQ9.rg.lci, " - ", PHQ9.rg.uci)
+GAD7.rg.ci = paste0(GAD7.rg.lci, " - ", GAD7.rg.uci)
+WSAS.rg.ci = paste0(WSAS.rg.lci, " - ", WSAS.rg.uci)
+ldsc.rg.ci = cbind(PHQ9.rg.ci, GAD7.rg.ci, WSAS.rg.ci)
+rownames(ldsc.rg.ci) = c("PHQ9", "GAD7", "WSAS")
+colnames(ldsc.rg.ci) = c("PHQ9", "GAD7", "WSAS")
+ldsc.rg.ci%>%
+  kable(caption = "rg CIs")%>%
+  kable_styling()
+
+
+#p
+PHQ9.p = c(0, 5.3782e-14, 1.3332e-14)
+GAD7.p = c(5.3782e-14, 0, 1.4386e-06)
+WSAS.p = c(1.3332e-14, 1.4386e-06, 0)
+ldsc.rg.p = rbind(PHQ9.p, GAD7.p, WSAS.p)
+
+ldsc.rg.p <- ldsc.rg.p%>%
+  as.data.frame()%>%
+  mutate(across(where(is.numeric), formatv, digit = 1, nsmall = 3))
+ldsc.rg.p%>%kable(caption = "rg p-vals",
+                  col.names = c("PHQ9", "GAD7", "WSAS"),
+                   digits = c(rep(3, 3)))%>%
+  kable_styling()
+
+```
+
+## Figure
+```{r Plot ldsc rg heat}
+
+ldsc.rg = ldsc.rg%>%
+  as.data.frame(.)%>%
+  rownames_to_column(var = "measure1")%>%
+  pivot_longer(-measure1, "measure2")%>%
+  mutate(across(where(is.numeric), round, 3))%>%
+  filter(!is.na(value))
+
+ldsc.rg = ldsc.rg%>%
+  mutate(measure1 = factor(measure1, levels = c("PHQ9", "GAD7", "WSAS")),
+         measure2 = factor(measure2, levels = c("PHQ9", "GAD7", "WSAS")))
+
+ldsc.rg%>%
+  arrange(measure1, measure2) %>%
+  group_by(measure1) %>%
+  filter(row_number() >= which(measure1 == measure2)) %>%
+ggplot(., 
+       aes(measure2, measure1, fill = value))+
+  geom_tile(color = "white")+
+  scale_fill_gradient2(low = "blue",
+                       high = "red",
+                       mid = "white",
+                       midpoint = 0,
+                       limit = c(-1,1.2),
+                       space = "Lab",
+                       name="Pearson\nCorrelation") +
+  coord_fixed() + 
+geom_text(aes(measure2, measure1, label = value), 
+          color = "black",
+          size = 5) +
+  labs(title = "LDSC estimated rg") +
+theme(axis.title = element_blank(),
+      axis.text = element_text(colour="black",
+                               size = 12,
+                               angle = 30),
+  panel.grid.major.x = element_blank(),
+  panel.border = element_blank(),
+  panel.background = element_blank(),
+  axis.ticks = element_blank(),
+  legend.justification = c(1, 0),
+  legend.position = c(0.45, 0.7),
+  legend.direction = "horizontal") +
+  guides(fill = guide_colorbar(barwidth = 7,
+                               barheight = 1,
+                title.position = "top",
+                title.hjust = 0.5))
+
+```
+
+Alternative fig: point with error bars - used in paper supplementary
+duplicates information e.g. PHQ9 with GAD7 and GAD7 with PHQ9 but easier to read maybe?
+```{r data prep ldsc rg point error bar}
+
+measure1 <- factor(rep(c("PHQ9", "GAD7", "WSAS"), each = 3, times = 2))
+measure2 <- factor(rep(c("PHQ9", "GAD7", "WSAS"), 6))
+corr.type <- factor(rep(c("genetic", "phenotypic"), each = 9))
+
+rg <- c(1, 0.829, 0.8211, 0.829, 1, 0.7686, 0.8211, 0.7686, 1)
+rg.se <- c(0, 0.1187, 0.1066, 0.1187, 0, 0.1595, 0.1066, 0.1595, 0)
+rg.lci <- rg-(1.96*rg.se)
+rg.uci <- rg+(1.96*rg.se)
+rg.p <- c(0, 2.901e-12, 1.3332e-14, 2.901e-12, 0, 1.4386e-06, 1.3332e-14, 1.4386e-06, 0)
+
+rgp <- c(rg, 1, 0.693, 0.632, 0.693, 1, 0.495, 0.632, 0.495, 1)
+rgp.lci <- c(rg.lci, 1, 0.685, 0.623, 0.685, 1, 0.484, 0.623, 0.484, 1)
+rgp.uci <- c(rg.uci, 1, 0.701, 0.641, 0.701, 1, 0.506, 0.641, 0.506, 1)
+rgp.p <- c(rg.p, rep(0, length(rg.p)))
+rgp.sig <- rgp.p<(0.05/3)
+rgp.plot.point <- data.frame(measure1, measure2, corr.type, rgp, rgp.lci, rgp.uci, rgp.p, rgp.sig)
+rgp.plot.point <- rgp.plot.point%>%
+  mutate(measure1 = fct_relevel(measure1, "PHQ9", "GAD7", "WSAS"),
+         measure2 = fct_relevel(measure2, "PHQ9", "GAD7", "WSAS"))%>%
+   unite("corrmeasure", measure2, corr.type, sep = " ", remove = FALSE)%>%
+  mutate(corrmeasure = fct_relevel(corrmeasure,
+                                   c("PHQ9 genetic",
+                                     "PHQ9 phenotypic",
+                                     "GAD7 genetic",
+                                     "GAD7 phenotypic",
+                                     "WSAS genetic",
+                                     "WSAS phenotypic")))
+
+```
+
+```{r Plot ldsc rg point error bar}
+
+Dark2rep = c("#E7298A", "#E7298A", "#009974", "#009974", "#D95F02", "#D95F02")
+
+ggplot(rgp.plot.point,
+       aes(x=measure1,
+           y=rgp,
+           group=corrmeasure, 
+           colour=corrmeasure,
+           shape=corrmeasure)) + 
+ geom_point(position=position_dodge(width=.5),
+            size=3) +
+  geom_errorbar(aes(ymin=rgp.lci, ymax=rgp.uci),
+       width=.1,
+       position=position_dodge(0.5)) +
+  scale_fill_manual(values = Dark2rep) +
+  scale_color_manual(values = Dark2rep) +
+  scale_shape_manual(values = c(15,0,16,1,17,2)) + #hollow/filled square = 0/15, hollow/filled circle = 1/16, hollow/filled triangle = 2/17
+  scale_y_continuous(limits=c(0,1.12),
+                     breaks=c(0,0.25,0.5,0.75,1)) +
+  geom_hline(yintercept=as.numeric(c(0)),
+             linetype="dotted",
+             colour="darkgray")+
+  labs(x = "Trait",
+       y="LDSC rg") + 
+   guides(colour = guide_legend(nrow=1,byrow=TRUE)) + 
+  my_theme +
+  theme(legend.title = element_blank(),
+        legend.position = "bottom",
+        panel.grid.major.y = element_line(linetype = "dotted",
+                                          colour = "gray"))
+
+```
+
+## Jackknife Genetic Correlations
+Calculate whether the rg phq9 and wsas != 1, rg gad7 and wsas != 1  
+Scripts adapted from Christopher Huebel & Jonathan Coleman(?)
+```{bash delete values for jacknifing, eval = F}
+
+rm generateDeletevalues.sh
+cat <<'EOT'>> generateDeletevalues.sh
+#!/bin/bash
+input1=$1
+input2=$2
+output1=$3
+
+cd ~/credentials
+workdir=$(sed '2q;d' paths.config.sh)
+hm3_ref=$(sed '6q;d' paths.config.sh)
+
+module add devtools/anaconda/2019.3-python2.7.16 
+python /users/k1756554/ldsc/ldsc.py \
+--n-blocks 200 \
+--print-delete-vals \
+--rg ${input1},${input2} \
+--ref-ld-chr ${hm3_ref}eur_w_ld_chr/ \
+--w-ld-chr ${hm3_ref}eur_w_ld_chr/ \
+--out ${output1}
+
+EOT
+
+```
+
+```{bash doJackyIsGeneticCorrelationDiffFrom1.py, eval = F}
+
+#!/usr/bin/env python
+import sys
+import csv
+import numpy as np
+import scipy.stats
+
+#delete values for first genetic covariance file
+deletefilec1=sys.argv[1]
+#delete values heritability trait 1 correlation 1
+deletefileh1=sys.argv[2]
+#delete values heritability trait 2 correlation 1
+deletefileh2=sys.argv[3]
+#global genetic correlation
+globgencorr=sys.argv[4]
+
+outfile=sys.argv[5]
+
+
+with open(deletefilec1, 'rt') as fc1, open(deletefileh1, 'rt') as fh1, open(deletefileh2, 'rt') as fh2:
+        reader = csv.reader(fc1, delimiter='\t', quoting=csv.QUOTE_NONE)
+        delete_values_c1 = np.array(list(reader)).astype('float64')
+        reader = csv.reader(fh1, delimiter='\t', quoting=csv.QUOTE_NONE)
+        delete_values_h1 = np.array(list(reader)).astype('float64')
+        reader = csv.reader(fh2, delimiter='\t', quoting=csv.QUOTE_NONE)
+        delete_values_h2 = np.array(list(reader)).astype('float64')
+
+delete_values = (delete_values_c1/np.sqrt(delete_values_h1*delete_values_h2))
+
+def jknife(pseudovalues, outfile):
+        n_blocks = pseudovalues.shape[0]
+        jknife_cov = np.atleast_2d(np.cov(pseudovalues.T, ddof=1) / n_blocks)
+        jknife_var = np.atleast_2d(np.diag(jknife_cov))
+        jknife_se = np.atleast_2d(np.sqrt(jknife_var))
+        jknife_est = np.atleast_2d(np.mean(pseudovalues, axis=0))
+        zscore1=(float(jknife_est)-1.0)/float(jknife_se)
+        p_value1 = scipy.stats.norm.sf(abs(zscore1))*2
+        outlog = open(outfile,'w')
+        outlog.write("nblocks: %s\t" % n_blocks)
+        outlog.write("var: %s\t" % jknife_var)
+        outlog.write("se: %s\t" % jknife_se)
+        outlog.write("estimate: %s\t" % jknife_est)
+        outlog.write("zscore(rg!=1): %s\t" % zscore1)
+        outlog.write("pvalue(rg!=1): %s\t" % p_value1)
+        outlog.close()
+
+def delete_values_to_pseudovalues(delete_values, est):
+        n_blocks = len(delete_values)
+        return n_blocks * est - (n_blocks - 1) * delete_values
+
+jknife(delete_values_to_pseudovalues(delete_values, float(globgencorr)),outfile)
+
+```
+
+```{bash compareGeneticCorrelations1, eval = F}
+
+rm compareGeneticCorrelations1.sh
+cat <<'EOT'>> compareGeneticCorrelations1.sh
+
+#!/bin/bash
+
+cd ~/credentials
+outpath=$(sed '2q;d' paths.config.sh)results/ldsc/int_rg/jackknife/delete_vals
+hm3_ref=$(sed '6q;d' paths.config.sh)
+results=$(sed '2q;d' paths.config.sh)results/ldsc/int_rg/jackknife/
+jackscript=$(sed '7q;d' paths.config.sh)
+  
+log1=$1
+phen1=$2
+phen2=$3
+output=$4
+globalrg1=$(grep "Genetic Correlation:" ${log1}|awk '{printf $3}')
+
+echo "correlation1: $globalrg1"
+
+echo "output written to:${results}"
+
+module add devtools/anaconda/2019.3-python2.7.16 
+python ${jackscript}scripts/doJackyIsGeneticCorrelationDiffFrom1.py \
+${outpath}/${phen1}_${phen2}${phen1}_${phen2}.gencov.delete \
+${outpath}/${phen1}_${phen2}${phen1}_${phen2}.hsq1.delete \
+${outpath}/${phen1}_${phen2}${phen1}_${phen2}.hsq2.delete \
+$globalrg1 \
+$output
+
+echo ""
+EOT
+
+```
+
+```{bash input for jackknifing, eval = F}
+
+cd ~/credentials
+sumstats=$(sed '2q;d' paths.config.sh)results/ldsc/
+results=$(sed '2q;d' paths.config.sh)results/ldsc/int_rg/jackknife/
+outpath=$(sed '2q;d' paths.config.sh)results/ldsc/int_rg/jackknife/delete_vals
+logpath=$(sed '2q;d' paths.config.sh)results/ldsc/int_rg/jackknife/logs
+scripts=$(sed '2q;d' paths.config.sh)scripts
+
+phq=phq9_munged_extraqc_hm3_1kg_noMHChighLD.sumstats.gz
+gad=gad7_munged_extraqc_hm3_1kg_noMHChighLD.sumstats.gz
+wsas=wsas_munged_extraqc_hm3_1kg_noMHChighLD.sumstats.gz
+
+for phenofile in ${phq} ${gad}
+do
+sh ${scripts}/generateDeletevalues.sh \
+$sumstats/$phenofile \
+$sumstats/${wsas} \
+$outpath/${phenofile}_${wsas}
+done
+
+mv $outpath/*.log $logpath/
+  
+  
+  for phenofile in ${phq} ${gad}
+do
+bash ${scripts}/compareGeneticCorrelations1.sh \
+$logpath/${phenofile}_${wsas}.log \
+$phenofile \
+${wsas} \
+$results/${phenofile}_${wsas}
+done
+
+```
+
+## Sensitivity/secondary: Investigate relationship between complete case WSAS 5-item (WSAS-5-c) WSAS 4-item total score and work item 
+
+### WSAS-5-c 
+Complete case WSAS 5-item score
+```{bash ldsc internal wsas rg, eval = F}
+
+cd ~/credentials
+workdir=$(sed '2q;d' paths.config.sh) 
+
+rm ${workdir}scripts/LDSC_rg_WSAS_sumstats.sh
+cat <<'EOT'>> ${workdir}scripts/LDSC_rg_WSAS_sumstats.sh
+#!/bin/bash -l
+#SBATCH --partition brc,shared
+#SBATCH --time=0-48:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --mem-per-cpu=19G
+#SBATCH --job-name=ldsc_rg
+#SBATCH --output=/tmp_scratch/users/k1756554/glad_phq9gad7wsas/output/ldsc_rg_wsasrwsas4_LDSCref%j.out
+
+workdir=$(sed '2q;d' paths.config.sh)
+hm3_ref=$(sed '6q;d' paths.config.sh)
+
+module add devtools/anaconda/2019.3-python2.7.16 
+
+python /users/k1756554/ldsc/ldsc.py \
+--rg ${workdir}results/ldsc/wsas_munged_extraqc_hm3_1kg_noMHChighLD.sumstats.gz,${workdir}results/ldsc/rwsas4_munged_extraqc_hm3_1kg_noMHChighLD.sumstats.gz \
+--ref-ld-chr ${hm3_ref}eur_w_ld_chr/ \
+--w-ld-chr ${hm3_ref}eur_w_ld_chr/ \
+--out ${workdir}results/ldsc/int_rg/wsas_ldsc_rg_extraqc_noMHChighLD_LDSCref
+
+EOT
+
+sbatch ${workdir}scripts/LDSC_rg_WSAS_sumstats.sh
+
+```
+
+### WSAS-4
+```{bash ldsc internal rwsas work rg, eval = F}
+
+cd ~/credentials
+workdir=$(sed '2q;d' paths.config.sh) 
+
+rm ${workdir}scripts/LDSC_rg_WSAS4work_sumstats.sh
+cat <<'EOT'>> ${workdir}scripts/LDSC_rg_WSAS4work_sumstats.sh
+#!/bin/bash -l
+#SBATCH --partition brc,shared
+#SBATCH --time=0-48:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --mem-per-cpu=19G
+#SBATCH --job-name=ldsc_rg
+#SBATCH --output=/tmp_scratch/users/k1756554/glad_phq9gad7wsas/output/ldsc_rg_rwsas4work_LDSCref%j.out
+
+workdir=$(sed '2q;d' paths.config.sh)
+hm3_ref=$(sed '6q;d' paths.config.sh)
+
+module add devtools/anaconda/2019.3-python2.7.16 
+
+python /users/k1756554/ldsc/ldsc.py \
+--rg ${workdir}results/ldsc/rwsas4_munged_extraqc_hm3_1kg_noMHChighLD.sumstats.gz,${workdir}results/ldsc/wsas_work_munged_extraqc_hm3_1kg_noMHChighLD.sumstats.gz \
+--ref-ld-chr ${hm3_ref}eur_w_ld_chr/ \
+--w-ld-chr ${hm3_ref}eur_w_ld_chr/ \
+--out ${workdir}results/ldsc/int_rg/wsas4_ldsc_rg_extraqc_noMHChighLD_LDSCref
+
+EOT
+
+sbatch ${workdir}scripts/LDSC_rg_WSAS4work_sumstats.sh
+
+```
+
+### Completers' WSAS-4
+```{bash ldsc internal completers rwsas work rg, eval = F}
+
+cd ~/credentials
+workdir=$(sed '2q;d' paths.config.sh) 
+
+rm ${workdir}scripts/LDSC_rg_complWSAS4work_sumstats.sh
+cat <<'EOT'>> ${workdir}scripts/LDSC_rg_complWSAS4work_sumstats.sh
+#!/bin/bash -l
+#SBATCH --partition brc,shared
+#SBATCH --time=0-48:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --mem-per-cpu=19G
+#SBATCH --job-name=ldsc_rg
+#SBATCH --output=/tmp_scratch/users/k1756554/glad_phq9gad7wsas/output/ldsc_rg_complrwsas4work_LDSCref%j.out
+
+workdir=$(sed '2q;d' paths.config.sh)
+hm3_ref=$(sed '6q;d' paths.config.sh)
+
+module add devtools/anaconda/2019.3-python2.7.16 
+
+python /users/k1756554/ldsc/ldsc.py \
+--rg ${workdir}results/ldsc/complwsas_rwsas4_munged_extraqc_hm3_1kg_noMHChighLD.sumstats.gz,${workdir}results/ldsc/wsas_work_munged_extraqc_hm3_1kg_noMHChighLD.sumstats.gz \
+--ref-ld-chr ${hm3_ref}eur_w_ld_chr/ \
+--w-ld-chr ${hm3_ref}eur_w_ld_chr/ \
+--out ${workdir}results/ldsc/int_rg/complwsas4_ldsc_rg_extraqc_noMHChighLD_LDSCref
+
+EOT
+
+sbatch ${workdir}scripts/LDSC_rg_complWSAS4work_sumstats.sh
+
+```
+
+### Incompleters' WSAS-4
+The 4-item score for participants without the work item. Low n ~2k.
+```{bash ldsc internal incompleters rwsas work rg, eval = F}
+
+conda activate ldsc_env
+cd ~/credentials
+workdir=$(sed '2q;d' paths.config.sh) 
+
+rm ${workdir}scripts/LDSC_rg_incomplWSAS4work_sumstats.sh
+cat <<'EOT'>> ${workdir}scripts/LDSC_rg_incomplWSAS4work_sumstats.sh
+#!/bin/bash -l
+#SBATCH --partition cpu
+#SBATCH --time=0-48:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --mem-per-cpu=19G
+#SBATCH --job-name=ldsc_rg
+#SBATCH --output=../output/ldsc_rg_complrwsas4work_LDSCref%j.out
+
+workdir=$(sed '2q;d' paths.config.sh)
+hm3_ref=$(sed '6q;d' paths.config.sh)
+
+python /users/k1756554/ldsc/ldsc.py \
+--rg ${workdir}results/ldsc/incomplwsas_rwsas4_munged_extraqc_hm3_1kg_noMHChighLD.sumstats.gz,${workdir}results/ldsc/complwsas_rwsas4_munged_extraqc_hm3_1kg_noMHChighLD.sumstats.gz,${workdir}results/ldsc/wsas_work_munged_extraqc_hm3_1kg_noMHChighLD.sumstats.gz \
+--ref-ld-chr ${hm3_ref}eur_w_ld_chr/ \
+--w-ld-chr ${hm3_ref}eur_w_ld_chr/ \
+--out ${workdir}results/ldsc/int_rg/incomplwsas4_ldsc_rg_extraqc_noMHChighLD_LDSCref
+
+EOT
+
+sbatch ${workdir}scripts/LDSC_rg_incomplWSAS4work_sumstats.sh
+
+```
+
+### Table & figure with complete case WSAS and 4-item WSAS
+```{r Input tables ldsc rg WSAS-5-c WSAS-4}
+
+#rg
+PHQ9.rg = c(1, 0.8508, 0.8546, 0.8253)
+GAD7.rg = c(0.8508, 1, 0.7928, 0.7182)
+WSAS.rg = c(0.8546, 0.7928, 1, 1.0188)
+rWSAS4.rg = c(0.8253, 0.7182, 1.0188, 1)
+ldsc.rg = rbind(PHQ9.rg, GAD7.rg, WSAS.rg, rWSAS4.rg)
+colnames(ldsc.rg) = c("PHQ9", "GAD7", "WSAS-5-c", "WSAS-4")
+rownames(ldsc.rg) = c("PHQ9", "GAD7", "WSAS-5-c", "WSAS-4")
+ldsc.rg%>%kable(caption = "rgs",
+                   digits = c(rep(2, 4)))%>%
+  kable_styling()
+
+
+#SE
+PHQ9.rg.se = c(0, 0.1131, 0.1138, 0.1094)
+GAD7.rg.se = c(0.1131, 0, 0.1731, 0.1713)
+WSAS.rg.se = c(0.1138, 0.1731, 0, 0.0227)
+rWSAS4.rg.se = c(0.1094, 0.1713, 0.0227, 0)
+ldsc.rg.se = rbind(PHQ9.rg.se, GAD7.rg.se, WSAS.rg.se, rWSAS4.rg.se)
+colnames(ldsc.rg.se) = c("PHQ9", "GAD7", "WSAS-5-c", "WSAS-4")
+ldsc.rg.se%>%kable(caption = "rg SEs",
+                   digits = c(rep(3, 4)))%>%
+  kable_styling()
+
+
+#95% CI
+PHQ9.rg.lci = round(PHQ9.rg - (1.96*PHQ9.rg.se),3)
+PHQ9.rg.uci = round(PHQ9.rg + (1.96*PHQ9.rg.se),3)
+GAD7.rg.lci = round(GAD7.rg - (1.96*GAD7.rg.se),3)
+GAD7.rg.uci = round(GAD7.rg + (1.96*GAD7.rg.se),3)
+WSAS.rg.lci = round(WSAS.rg - (1.96*WSAS.rg.se),3)
+WSAS.rg.uci = round(WSAS.rg + (1.96*WSAS.rg.se),3)
+rWSAS4.rg.lci = round(rWSAS4.rg - (1.96*rWSAS4.rg.se),3)
+rWSAS4.rg.uci = round(rWSAS4.rg + (1.96*rWSAS4.rg.se),3)
+PHQ9.rg.ci = paste0(PHQ9.rg.lci, " - ", PHQ9.rg.uci)
+GAD7.rg.ci = paste0(GAD7.rg.lci, " - ", GAD7.rg.uci)
+WSAS.rg.ci = paste0(WSAS.rg.lci, " - ", WSAS.rg.uci)
+rWSAS4.rg.ci = paste0(rWSAS4.rg.lci, " - ", rWSAS4.rg.uci)
+ldsc.rg.ci = cbind(PHQ9.rg.ci, GAD7.rg.ci, WSAS.rg.ci, rWSAS4.rg.ci)
+rownames(ldsc.rg.ci) = c("PHQ9", "GAD7", "WSAS-5-c", "WSAS-4")
+colnames(ldsc.rg.ci) = c("PHQ9", "GAD7", "WSAS-5-c", "WSAS-4")
+ldsc.rg.ci%>%
+  kable(caption = "rg CIs")%>%
+  kable_styling()
+
+
+#p
+PHQ9.p = c(0, 5.3782e-14, 5.9407e-14, 4.5393e-14)
+GAD7.p = c(5.3782e-14, 0, 4.6579e-06, 2.7671e-05)
+WSAS.p = c(5.9407e-14, 4.6579e-06, 0, 0)
+rWSAS4.p = c(4.5393e-14, 2.7671e-05, 0, 0)
+ldsc.rg.p = rbind(PHQ9.p, GAD7.p, WSAS.p, rWSAS4.p)
+
+ldsc.rg.p <- ldsc.rg.p%>%
+  as.data.frame()%>%
+  mutate(across(where(is.numeric), formatv, digit = 1, nsmall = 3))
+ldsc.rg.p%>%kable(caption = "rg p-vals",
+                  col.names = c("PHQ9", "GAD7", "WSAS-5-c", "WSAS-4"),
+                   digits = c(rep(3, 3)))%>%
+  kable_styling()
+
+```
+
+
+```{r Plot ldsc rg heat WSAS-5-c WSAS-4}
+
+ldsc.rg = ldsc.rg%>%
+  as.data.frame(.)%>%
+  rownames_to_column(var = "measure1")%>%
+  pivot_longer(-measure1, "measure2")%>%
+  mutate(across(where(is.numeric), round, 3))%>%
+  filter(!is.na(value))
+
+ldsc.rg = ldsc.rg%>%
+  mutate(measure1 = factor(measure1, levels = c("PHQ9", "GAD7", "WSAS-5-c", "WSAS-4")),
+         measure2 = factor(measure2, levels = c("PHQ9", "GAD7", "WSAS-5-c", "WSAS-4")))
+
+ldsc.rg%>%
+  arrange(measure1, measure2) %>%
+  group_by(measure1) %>%
+  filter(row_number() >= which(measure1 == measure2)) %>%
+ggplot(., 
+       aes(measure2, measure1, fill = value))+
+  geom_tile(color = "white")+
+  scale_fill_gradient2(low = "blue",
+                       high = "red",
+                       mid = "white",
+                       midpoint = 0,
+                       limit = c(-1,1.2),
+                       space = "Lab",
+                       name="Pearson\nCorrelation") +
+  coord_fixed() + 
+geom_text(aes(measure2, measure1, label = value), 
+          color = "black",
+          size = 5) +
+  labs(title = "LDSC estimated rg") +
+theme(axis.title = element_blank(),
+      axis.text = element_text(colour="black",
+                               size = 12,
+                               angle = 30),
+  panel.grid.major = element_blank(),
+  panel.border = element_blank(),
+  panel.background = element_blank(),
+  axis.ticks = element_blank(),
+  legend.justification = c(1, 0),
+  legend.position = c(0.45, 0.7),
+  legend.direction = "horizontal")+
+  guides(fill = guide_colorbar(barwidth = 7,
+                               barheight = 1,
+                title.position = "top",
+                title.hjust = 0.5))
+
+```
+
+Alternative plot: point with error bars
+
+```{r data prep ldsc rg point error bar WSAS-5-c wsas WSAS-4}
+
+measure1 <- factor(rep(c("PHQ9", "GAD7", "WSAS-5-c","WSAS-4"), each = 4, times = 2))
+measure2 <- factor(rep(c("PHQ9", "GAD7", "WSAS-5-c", "WSAS-4"), 8))
+corr.type <- factor(rep(c("genetic", "phenotypic"), each = 16))
+rg <- c(1, 0.829, 0.8406, 0.8201, 
+        0.829, 1, 0.7767, 0.7134, 
+        0.8406, 0.7767, 1, 1.0176,
+        0.8201, 0.7134, 1.0176, 1)
+rg.se <- c(0, 0.1187, 0.1164, 0.1101, 
+           0.1187, 0, 0.1719, 0.1715, 
+           0.1164, 0.1719, 0, 0.0226,
+           0.1101, 0.1715, 0.0226, 0)
+rg.lci <- rg-(1.96*rg.se)
+rg.uci <- rg+(1.96*rg.se)
+rg.p <- c(0, 2.901e-12, 5.1602e-13, 9.2917e-14,
+          2.901e-12, 0, 6.2302e-06, 3.1863e-05,
+          5.1602e-13, 6.2302e-06, 0, 0,
+          9.2917e-14, 3.1863e-05, 0, 0)
+
+rgp <- c(rg, 1, 0.693, 0.629, 0.624,
+         0.693, 1, 0.492, 0.486,
+         0.629, 0.492, 1, 0.980,
+         0.624, 0.486, 0.980, 1)
+rgp.lci <- c(rg.lci, 1, 0.685, 0.620, 0.615, 
+             0.685, 1, 0.480, 0.475, 
+             0.620, 0.480, 1, 0.979,
+             0.615, 0.475, 0.979, 1)
+rgp.uci <- c(rg.uci, 1, 0.701, 0.639, 0.633,
+             0.701, 1, 0.504, 0.497, 
+             0.639, 0.504, 1, 0.980,
+             0.633, 0.497, 0.980, 1)
+rgp.p <- c(rg.p, rep(0, length(rg.p)))
+rgp.sig <- rgp.p<(0.05/3)
+rgp.plot.point <- data.frame(measure1, measure2, corr.type, rgp, rgp.lci, rgp.uci, rgp.p, rgp.sig)
+rgp.plot.point <- rgp.plot.point%>%
+  mutate(measure1 = fct_relevel(measure1, "PHQ9", "GAD7", "WSAS-5-c", "WSAS-4"),
+         measure2 = fct_relevel(measure2, "PHQ9", "GAD7", "WSAS-5-c", "WSAS-4"))%>%
+  unite("corrmeasure", measure2, corr.type, sep = " ", remove = FALSE)%>%
+  mutate(corrmeasure = fct_relevel(corrmeasure,
+                                   c("PHQ9 genetic",
+                                     "PHQ9 phenotypic",
+                                     "GAD7 genetic",
+                                     "GAD7 phenotypic",
+                                     "WSAS-5-c genetic ",
+                                     "WSAS-5-c phenotypic ",
+                                     "WSAS-4 genetic",
+                                     "WSAS-4 phenotypic")))
+
+```
+
+```{r Plot ldsc rg point error bar WSAS-5-c WSAS-4}
+
+Dark2rep = c("#E7298A", "#E7298A", "#009974", "#009974", "#D95F02", "#D95F02", "#7570B3", "#7570B3")
+
+ggplot(rgp.plot.point,
+       aes(x=measure1,
+           y=rgp,
+           group=corrmeasure, 
+           colour=corrmeasure,
+           shape=corrmeasure)) + 
+ geom_point(position=position_dodge(width=.5),
+            size=3) +
+  geom_errorbar(aes(ymin=rgp.lci, ymax=rgp.uci),
+       width=.1,
+       position=position_dodge(0.5)) +
+  scale_fill_manual(values = Dark2rep) +
+  scale_color_manual(values = Dark2rep) +
+  scale_shape_manual(values = c(15,0,16,1,17,2,18,5)) + #hollow/filled square = 0/15, hollow/filled circle = 1/16, hollow/filled triangle = 2/17, hollow/filled diamond = 5/18
+  scale_y_continuous(limits=c(0,1.12),
+                     breaks=c(0,0.25,0.5,0.75,1)) +
+  geom_hline(yintercept=as.numeric(c(0)),
+             linetype="dotted",
+             colour="darkgray")+
+  labs(x = "Trait",
+       y="LDSC rg") + 
+   guides(colour = guide_legend(nrow=2,byrow=TRUE)) + 
+  my_theme +
+  theme(legend.title = element_blank(),
+        legend.position = "bottom",
+        panel.grid.major.y = element_line(linetype = "dotted",
+                                          colour = "gray"))
+
+```
+
+
+# External correlations with repository sumstats
+
+## Munge repository sumstats to HM3 & 1KG variants
+
+```{bash munge repo sumstats to hm3 1kg, eval = F}
+
+conda activate ldsc_env
+cd ~/credentials
+workdir=$(sed '2q;d' paths.config.sh) 
+
+rm ${workdir}scripts/LDSC_munge_hm31kg_repo_sumstats.sh
+cat <<'EOT'>> ${workdir}scripts/LDSC_munge_hm31kg_repo_sumstats.sh
+#!/bin/bash -l
+#SBATCH --partition cpu
+#SBATCH --time=0-48:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --mem-per-cpu=19G
+#SBATCH --job-name=munge_repo_ldsc
+#SBATCH --output=../output/ldsc_munge_repo_hm31kg_%j.out
+
+workdir=$(sed '2q;d' paths.config.sh)
+hm3_1kg_ref=$(sed '3q;d' paths.config.sh)
+repo_sumstats=$(sed '7q;d' paths.config.sh)
+
+FILES=("DEPR07" "ANXI03" "SCHI04" "EDUC03" "HEAL01")
+for f in ${FILES[@]};
+do
+
+python /users/k1756554/ldsc/munge_sumstats.py \
+--sumstats ${repo_sumstats}cleaned/${f}.gz \
+--merge-alleles ${hm3_1kg_ref}combined.hm3_1kg.snplist.vanilla.jz2020.txt \
+--chunksize 50000 \
+--out ${workdir}results/ldsc/external_sumstats/${f}_munged_hm3_1kg
+
+done
+
+EOT
+
+sbatch ${workdir}scripts/LDSC_munge_hm31kg_repo_sumstats.sh
+
+```
+
+### Remove MHC High LD region
+Using rsIDs identified from HM3 1KG variant SNP list
+```{bash Remove regions from ext sumstats using SNP list, eval = F}
+
+cd ~/credentials
+workdir=$(sed '2q;d' paths.config.sh)
+
+cd ${workdir}results/ldsc/external_sumstats
+
+printf "DEPR07
+ANXI03
+SCHI04
+EDUC03
+HEAL01 \n" > ext_traits_for_mhc_removal.txt
+
+varid=ext_traits_for_mhc_removal.txt
+echo $varid
+
+pathvarid="${workdir}results/ldsc/external_sumstats/${varid}"
+echo $pathvarid
+
+countvarid=$(wc -l ${pathvarid}|awk '{printf $1}')
+echo $countvarid
+
+cd ${workdir}results/ldsc/highld_excl
+
+for i in `seq 1 ${countvarid}`
+
+do name=$(gawk -v myvar=$i 'NR==myvar{printf $1}' ${pathvarid})
+
+if [ -f ${workdir}results/ldsc/external_sumstats/${name}_munged_hm3_1kg.sumstats.gz ]; then zcat ${workdir}results/ldsc/external_sumstats/${name}_munged_hm3_1kg.sumstats.gz > tmp; gawk -F"\t" '{if(f==1){r[$1]}else if(!($1 in r)){print}}' f=1 ldsc_hm31kg_highld_b38_imp_excludes f=2 tmp > ${workdir}results/ldsc/external_sumstats/${name}_munged_hm3_1kg_noMHChighLD.sumstats; gzip ${workdir}results/ldsc/external_sumstats/${name}_munged_hm3_1kg_noMHChighLD.sumstats; fi;
+
+done
+
+```
+
+## PHQ9
+Using the LDSC HM3 reference panel for LD scores
+```{bash ldsc phq9 ext rg, eval = F}
+
+conda activate ldsc_env
+cd ~/credentials
+workdir=$(sed '2q;d' paths.config.sh) 
+
+rm ${workdir}scripts/LDSC_rg_external_PHQ9GAD7WSAS.sh
+cat <<'EOT'>> ${workdir}scripts/LDSC_rg_external_PHQ9GAD7WSAS.sh
+#!/bin/bash -l
+#SBATCH --partition brc,shared
+#SBATCH --time=0-48:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --mem-per-cpu=19G
+#SBATCH --job-name=ldsc_rg
+#SBATCH --output=/tmp_scratch/users/k1756554/glad_phq9gad7wsas/output/phq9_ext_ldsc_rg_%j.out
+
+workdir=$(sed '2q;d' paths.config.sh)
+hm3_ref=$(sed '6q;d' paths.config.sh)
+
+python /users/k1756554/ldsc/ldsc.py \
+--rg ${workdir}results/ldsc/phq9_munged_extraqc_hm3_1kg_noMHChighLD.sumstats.gz,${workdir}results/ldsc/external_sumstats/DEPR07_munged_hm3_1kg_noMHChighLD.sumstats.gz,${workdir}results/ldsc/external_sumstats/ANXI03_munged_hm3_1kg_noMHChighLD.sumstats.gz,${workdir}results/ldsc/external_sumstats/SCHI04_munged_hm3_1kg_noMHChighLD.sumstats.gz,${workdir}results/ldsc/external_sumstats/EDUC03_munged_hm3_1kg_noMHChighLD.sumstats.gz,${workdir}results/ldsc/external_sumstats/HEAL01_munged_hm3_1kg_noMHChighLD.sumstats.gz \
+--ref-ld-chr ${hm3_ref}eur_w_ld_chr/ \
+--w-ld-chr ${hm3_ref}eur_w_ld_chr/ \
+--out ${workdir}results/ldsc/ext_rg/phq9_ldsc_rg_noMHChighLDLDSCref
+
+EOT
+
+sbatch ${workdir}scripts/LDSC_rg_external_PHQ9GAD7WSAS.sh
+
+```
+
+## GAD7
+```{bash ldsc gad7 ext rg, eval = F}
+
+cd ~/credentials
+workdir=$(sed '2q;d' paths.config.sh) 
+
+rm ${workdir}scripts/LDSC_rg_external_PHQ9GAD7WSAS.sh
+cat <<'EOT'>> ${workdir}scripts/LDSC_rg_external_PHQ9GAD7WSAS.sh
+#!/bin/bash -l
+#SBATCH --partition brc,shared
+#SBATCH --time=0-48:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --mem-per-cpu=19G
+#SBATCH --job-name=ldsc_rg
+#SBATCH --output=/tmp_scratch/users/k1756554/glad_phq9gad7wsas/output/gad7_ext_ldsc_rg_%j.out
+
+workdir=$(sed '2q;d' paths.config.sh)
+hm3_ref=$(sed '6q;d' paths.config.sh)
+
+module add devtools/anaconda/2019.3-python2.7.16 
+
+python /users/k1756554/ldsc/ldsc.py \
+--rg ${workdir}results/ldsc/gad7_munged_extraqc_hm3_1kg_noMHChighLD.sumstats.gz,${workdir}results/ldsc/external_sumstats/DEPR07_munged_hm3_1kg_noMHChighLD.sumstats.gz,${workdir}results/ldsc/external_sumstats/ANXI03_munged_hm3_1kg_noMHChighLD.sumstats.gz,${workdir}results/ldsc/external_sumstats/SCHI04_munged_hm3_1kg_noMHChighLD.sumstats.gz,${workdir}results/ldsc/external_sumstats/EDUC03_munged_hm3_1kg_noMHChighLD.sumstats.gz,${workdir}results/ldsc/external_sumstats/HEAL01_munged_hm3_1kg_noMHChighLD.sumstats.gz \
+--ref-ld-chr ${hm3_ref}eur_w_ld_chr/ \
+--w-ld-chr ${hm3_ref}eur_w_ld_chr/ \
+--out ${workdir}results/ldsc/ext_rg/gad7_ldsc_rg_noMHChighLDLDSCref
+
+EOT
+
+sbatch ${workdir}scripts/LDSC_rg_external_PHQ9GAD7WSAS.sh
+
+```
+
+## Imputed WSAS
+```{bash ldsc wsas_imp ext rg, eval = F}
+
+cd ~/credentials
+workdir=$(sed '2q;d' paths.config.sh) 
+
+rm ${workdir}scripts/LDSC_rg_external_PHQ9GAD7WSAS.sh
+cat <<'EOT'>> ${workdir}scripts/LDSC_rg_external_PHQ9GAD7WSAS.sh
+#!/bin/bash -l
+#SBATCH --partition brc,shared
+#SBATCH --time=0-48:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --mem-per-cpu=19G
+#SBATCH --job-name=ldsc_rg
+#SBATCH --output=/tmp_scratch/users/k1756554/glad_phq9gad7wsas/output/wsas_imp_ext_ldsc_rg_%j.out
+
+workdir=$(sed '2q;d' paths.config.sh)
+hm3_ref=$(sed '6q;d' paths.config.sh)
+
+module add devtools/anaconda/2019.3-python2.7.16 
+
+python /users/k1756554/ldsc/ldsc.py \
+--rg ${workdir}results/ldsc/wsas_imp_munged_extraqc_hm3_1kg_noMHChighLD.sumstats.gz,${workdir}results/ldsc/external_sumstats/DEPR07_munged_hm3_1kg_noMHChighLD.sumstats.gz,${workdir}results/ldsc/external_sumstats/ANXI03_munged_hm3_1kg_noMHChighLD.sumstats.gz,${workdir}results/ldsc/external_sumstats/SCHI04_munged_hm3_1kg_noMHChighLD.sumstats.gz,${workdir}results/ldsc/external_sumstats/EDUC03_munged_hm3_1kg_noMHChighLD.sumstats.gz,${workdir}results/ldsc/external_sumstats/HEAL01_munged_hm3_1kg_noMHChighLD.sumstats.gz \
+--ref-ld-chr ${hm3_ref}eur_w_ld_chr/ \
+--w-ld-chr ${hm3_ref}eur_w_ld_chr/ \
+--out ${workdir}results/ldsc/ext_rg/wsas_imp_ldsc_rg_noMHChighLDLDSCref
+
+EOT
+
+sbatch ${workdir}scripts/LDSC_rg_external_PHQ9GAD7WSAS.sh
+
+```
+
+## Sensitivity/secondary analyses
+
+### WSAS-5-c 
+Complete case WSAS 5-item score
+```{bash ldsc wsas ext rg, eval = F}
+
+cd ~/credentials
+workdir=$(sed '2q;d' paths.config.sh) 
+
+rm ${workdir}scripts/LDSC_rg_external_PHQ9GAD7WSAS.sh
+cat <<'EOT'>> ${workdir}scripts/LDSC_rg_external_PHQ9GAD7WSAS.sh
+#!/bin/bash -l
+#SBATCH --partition brc,shared
+#SBATCH --time=0-48:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --mem-per-cpu=19G
+#SBATCH --job-name=ldsc_rg
+#SBATCH --output=/tmp_scratch/users/k1756554/glad_phq9gad7wsas/output/wsas_ext_ldsc_rg_%j.out
+
+workdir=$(sed '2q;d' paths.config.sh)
+hm3_ref=$(sed '6q;d' paths.config.sh)
+
+module add devtools/anaconda/2019.3-python2.7.16 
+
+python /users/k1756554/ldsc/ldsc.py \
+--rg ${workdir}results/ldsc/wsas_munged_extraqc_hm3_1kg_noMHChighLD.sumstats.gz,${workdir}results/ldsc/external_sumstats/DEPR07_munged_hm3_1kg_noMHChighLD.sumstats.gz,${workdir}results/ldsc/external_sumstats/ANXI03_munged_hm3_1kg_noMHChighLD.sumstats.gz,${workdir}results/ldsc/external_sumstats/SCHI04_munged_hm3_1kg_noMHChighLD.sumstats.gz,${workdir}results/ldsc/external_sumstats/EDUC03_munged_hm3_1kg_noMHChighLD.sumstats.gz,${workdir}results/ldsc/external_sumstats/HEAL01_munged_hm3_1kg_noMHChighLD.sumstats.gz \
+--ref-ld-chr ${hm3_ref}eur_w_ld_chr/ \
+--w-ld-chr ${hm3_ref}eur_w_ld_chr/ \
+--out ${workdir}results/ldsc/ext_rg/wsas_ldsc_rg_noMHChighLDLDSCref
+
+EOT
+
+sbatch ${workdir}scripts/LDSC_rg_external_PHQ9GAD7WSAS.sh
+
+```
+
+### WSAS-4
+```{bash ldsc WSAS-4 ext rg, eval = F}
+
+cd ~/credentials
+workdir=$(sed '2q;d' paths.config.sh) 
+
+rm ${workdir}scripts/LDSC_rg_external_PHQ9GAD7WSAS.sh
+cat <<'EOT'>> ${workdir}scripts/LDSC_rg_external_PHQ9GAD7WSAS.sh
+#!/bin/bash -l
+#SBATCH --partition brc,shared
+#SBATCH --time=0-48:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --mem-per-cpu=19G
+#SBATCH --job-name=ldsc_rg
+#SBATCH --output=/tmp_scratch/users/k1756554/glad_phq9gad7wsas/output/rwsas4_ext_ldsc_rg_%j.out
+
+workdir=$(sed '2q;d' paths.config.sh)
+hm3_ref=$(sed '6q;d' paths.config.sh)
+
+module add devtools/anaconda/2019.3-python2.7.16 
+
+python /users/k1756554/ldsc/ldsc.py \
+--rg ${workdir}results/ldsc/rwsas4_munged_extraqc_hm3_1kg_noMHChighLD.sumstats.gz,${workdir}results/ldsc/external_sumstats/DEPR07_munged_hm3_1kg_noMHChighLD.sumstats.gz,${workdir}results/ldsc/external_sumstats/ANXI03_munged_hm3_1kg_noMHChighLD.sumstats.gz,${workdir}results/ldsc/external_sumstats/SCHI04_munged_hm3_1kg_noMHChighLD.sumstats.gz,${workdir}results/ldsc/external_sumstats/EDUC03_munged_hm3_1kg_noMHChighLD.sumstats.gz,${workdir}results/ldsc/external_sumstats/HEAL01_munged_hm3_1kg_noMHChighLD.sumstats.gz \
+--ref-ld-chr ${hm3_ref}eur_w_ld_chr/ \
+--w-ld-chr ${hm3_ref}eur_w_ld_chr/ \
+--out ${workdir}results/ldsc/ext_rg/rwsas4_ldsc_rg_noMHChighLDLDSCref
+
+EOT
+
+sbatch ${workdir}scripts/LDSC_rg_external_PHQ9GAD7WSAS.sh
+
+```
+
+### Table
+```{r table of external rgs}
+
+int_trait <- factor(c(rep("PHQ9", 5), rep("GAD7", 5), rep("WSAS", 5)))
+ext_trait <- factor(rep(c("MDD","Anxiety disorder","Schizophrenia","Years of education","Self-rated health"), 3))
+rg <- c(0.3641, 0.1653, -0.0422, -0.6124, -0.8185,
+        0.3867, 0.2021, 0.1397, -0.6032, -0.7397, 
+        0.4192, 0.1220, 0.0403, -0.3376, -0.6053)
+rg.se <- c(0.1110, 0.1079, 0.0753, 0.0903, 0.1302,
+          0.1277, 0.1239, 0.0967, 0.1154, 0.1572,
+          0.1110, 0.1005, 0.0703, 0.0623, 0.1113)
+rg.lci <- (rg-(1.96*rg.se))
+rg.uci <- (rg+(1.96*rg.se))
+z <- c(3.2791, 1.5326, -0.5605, -6.7793, -6.2855,
+       3.0278, 1.6318, 1.4453, -5.2247, -4.7061, 
+       3.7784, 1.2139, 0.5733, -5.4226, -5.4367)
+p <- c(1.0415e-03, 1.2538e-01, 5.7512e-01, 1.2074e-11, 3.2670e-10,
+       2.4638e-03, 1.0273e-01, 1.4837e-01, 1.7446e-07, 2.5247e-06,
+       1.5783e-04, 2.2477e-01, 5.6642e-01, 5.8743e-08, 5.4274e-08)
+
+ext.rg <- data.frame(int_trait, ext_trait, rg, rg.lci, rg.uci, z, p)
+ext.rg <- ext.rg%>%mutate(int_trait = 
+                               fct_relevel(int_trait, "PHQ9", "GAD7", "WSAS"),
+                          ext_trait =
+                            fct_relevel(ext_trait, "MDD","Anxiety disorder","Schizophrenia","Years of education","Self-rated health"))
+
+ext.rg.table <- ext.rg %>%
+  mutate(across(where(is.numeric), formatv, digit = 1, nsmall = 3))
+
+ext.rg.table%>%kable(caption = "Genetic Correlations with Existing Phenotypes",
+        col.names = c("Phenotype", "Existing Phenotype", "rg", "LCI", "UCI", "z", "p"),
+        escape = F,
+        digits = c(0, 0, rep(3, 5)),
+        align = "llccccc")%>%
+  kable_styling()
+
+```
+
+### Figure
+```{r plot of external rgs}
+
+ggplot(ext.rg,
+       aes(x=ext_trait,
+           y=rg, 
+           group=int_trait, 
+           colour=int_trait,
+           shape=int_trait)) + 
+ geom_point(position=position_dodge(width=.5),
+            size=3) +
+  scale_fill_manual(values = my.palette) +
+  scale_color_manual(values = my.palette) +
+  scale_shape_manual(values = c(15,16,17)) +
+  geom_errorbar(aes(ymin=rg.lci, ymax=rg.uci), 
+                width=.1,
+                position=position_dodge(0.5)) +
+  scale_y_continuous(limits=c(-1.15,1),
+                     breaks=c(-1,-0.5,0,0.5,1)) +
+  geom_hline(yintercept=as.numeric(c(0)),
+             linetype="solid",
+             colour="darkgray")+
+  labs(x = "Existing phenotype",
+       y = "Genetic correlation") + 
+   guides(colour = guide_legend(nrow=3,byrow=TRUE)) + 
+  my_theme +
+  theme(legend.title = element_blank(),
+        legend.position = "right",
+        panel.grid.major.y = element_line(linetype = "dotted",
+                                          colour = "gray"))
+
+ggsave("ldsc.extrg.corr.png", width = 18, height = 10, units = "cm", dpi=800)
+
+```
+
+### Figure with complete case WSAS and 4-item WSAS
+```{r plot of external rgs WSAS-5-c WSAS-4}
+
+int_trait <- factor(c(rep("PHQ9", 5), rep("GAD7", 5), rep("WSAS-5-c", 5), rep("WSAS-4", 5)))
+ext_trait <- factor(rep(c("MDD","Anxiety disorder","Schizophrenia","Years of education","Self-rated health"), 4))
+rg <- c(0.3641, 0.1653, -0.0422, -0.6124, -0.8185,
+        0.3867, 0.2021, 0.1397, -0.6032, -0.7397,
+        0.4169, 0.1297, 0.0485, -0.2850, -0.6092,
+        0.4143, 0.0856, 0.0011, -0.3279, -0.6101)
+rg.se <-c(0.1110, 0.1079, 0.0753, 0.0903, 0.1302,
+          0.1277, 0.1239, 0.0967, 0.1154, 0.1572,
+          0.1156, 0.1031, 0.0692, 0.0606, 0.1103,
+          0.1160, 0.1025, 0.0712, 0.0630, 0.1101)
+rg.lci <- (rg-(1.96*rg.se))
+rg.uci <- (rg+(1.96*rg.se))
+
+ext.rg <- data.frame(int_trait, ext_trait, rg, rg.lci,rg.uci)
+ext.rg <- ext.rg%>%mutate(int_trait = 
+                               fct_relevel(int_trait, "PHQ9", "GAD7", "WSAS-5-c", "WSAS-4"),
+                          ext_trait =
+                            fct_relevel(ext_trait, "MDD","Anxiety disorder","Schizophrenia","Years of education","Self-rated health"))
+
+ggplot(ext.rg,
+       aes(x=ext_trait,
+           y=rg, 
+           group=int_trait, 
+           colour=int_trait,
+           shape=int_trait)) + 
+ geom_point(position=position_dodge(width=.5),
+            size=3) +
+  scale_fill_manual(values = my.palette) +
+  scale_color_manual(values = my.palette) +
+  scale_shape_manual(values = c(15,16,17,18)) +
+  geom_errorbar(aes(ymin=rg.lci, ymax=rg.uci), 
+                width=.1,
+                position=position_dodge(0.5)) +
+  scale_y_continuous(limits=c(-1.15,1),
+                     breaks=c(-1,-0.5,0,0.5,1)) +
+  geom_hline(yintercept=as.numeric(c(0)),
+             linetype="solid",
+             colour="darkgray")+
+  labs(x = "Existing phenotype",
+       y = "Genetic correlation") + 
+   guides(colour = guide_legend(nrow=4,byrow=TRUE)) +   
+  my_theme +
+  theme(legend.title = element_blank(),
+        legend.position = "right",
+        panel.grid.major.y = element_line(linetype = "dotted",
+                                          colour = "gray"))
+
+```
